@@ -1,0 +1,14 @@
+# Python cache files
+__pycache__/
+*.py[oc]
+
+# Local environment/secrets
+.venv/
+.env
+
+# Runtime data (SQLite, logs, photos)
+data/
+
+# IDE and OS metadata
+.idea/
+.DS_Store

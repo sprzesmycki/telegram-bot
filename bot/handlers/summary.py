@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import logging
+import re
+from collections import defaultdict
+from datetime import date, datetime, timedelta
+
+from telegram import Update
+from telegram.ext import CommandHandler, ContextTypes
+
+from bot.handlers.profiles import get_target_profiles
+from bot.services import db_sqlite
+from bot.utils.formatting import format_report, format_summary, format_week
+
+logger = logging.getLogger(__name__)
+
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_single_profile(owner_id: int, text: str) -> dict | None:
+    profiles = await get_target_profiles(owner_id, text)
+    return profiles[0] if profiles else None
+
+
+# ---------------------------------------------------------------------------
+# /summary
+# ---------------------------------------------------------------------------
+
+
+async def summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    owner_id = update.effective_user.id
+    text = update.message.text or ""
+
+    profile = await _resolve_single_profile(owner_id, text)
+    if profile is None:
+        await update.message.reply_text("Profile not found.")
+        return
+
+    meals = await db_sqlite.get_meals_today(profile["id"], owner_id)
+    totals = await db_sqlite.get_daily_totals(profile["id"], owner_id)
+    goal = await db_sqlite.get_goal(profile["id"])
+
+    reply = format_summary(profile["name"], meals, totals, goal)
+    await update.message.reply_text(reply)
+
+
+# ---------------------------------------------------------------------------
+# /week
+# ---------------------------------------------------------------------------
+
+
+async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    owner_id = update.effective_user.id
+    text = update.message.text or ""
+
+    profile = await _resolve_single_profile(owner_id, text)
+    if profile is None:
+        await update.message.reply_text("Profile not found.")
+        return
+
+    today = date.today()
+    start = today - timedelta(days=6)
+    start_str = start.isoformat()
+    end_str = (today + timedelta(days=1)).isoformat()
+
+    meals = await db_sqlite.get_meals_range(profile["id"], owner_id, start_str, end_str)
+
+    # Aggregate calories per day
+    per_day: dict[str, int] = defaultdict(int)
+    for meal in meals:
+        eaten = meal["eaten_at"]
+        if isinstance(eaten, str):
+            day_str = eaten[:10]
+        else:
+            day_str = eaten.strftime("%Y-%m-%d")
+        per_day[day_str] += meal["calories"] or 0
+
+    daily_data: list[dict] = []
+    for i in range(7):
+        d = start + timedelta(days=i)
+        ds = d.isoformat()
+        daily_data.append({"date": ds, "calories": per_day.get(ds, 0)})
+
+    goal = await db_sqlite.get_goal(profile["id"])
+    reply = format_week(profile["name"], daily_data, goal)
+    await update.message.reply_text(reply)
+
+
+# ---------------------------------------------------------------------------
+# /report
+# ---------------------------------------------------------------------------
+
+
+async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    owner_id = update.effective_user.id
+    text = update.message.text or ""
+
+    profile = await _resolve_single_profile(owner_id, text)
+    if profile is None:
+        await update.message.reply_text("Profile not found.")
+        return
+
+    # Parse optional date
+    date_match = _DATE_RE.search(text)
+    if date_match:
+        report_date = date_match.group(0)
+    else:
+        report_date = date.today().isoformat()
+
+    next_day = (datetime.strptime(report_date, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
+    meals = await db_sqlite.get_meals_range(profile["id"], owner_id, report_date, next_day)
+
+    # Calculate totals
+    total = {"calories": 0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 0.0}
+    for meal in meals:
+        total["calories"] += meal["calories"] or 0
+        total["protein_g"] += meal["protein_g"] or 0
+        total["carbs_g"] += meal["carbs_g"] or 0
+        total["fat_g"] += meal["fat_g"] or 0
+
+    goal = await db_sqlite.get_goal(profile["id"])
+    total["goal"] = goal
+
+    supplements_scheduled = await db_sqlite.list_supplements(profile["id"], owner_id)
+    supplements_taken = await db_sqlite.get_supplement_logs_today(profile["id"])
+
+    # Enrich taken logs with supplement names for matching
+    taken_with_names: list[dict] = []
+    for log in supplements_taken:
+        for s in supplements_scheduled:
+            if s["id"] == log["supplement_id"]:
+                taken_with_names.append({"name": s["name"], "supplement_id": log["supplement_id"]})
+                break
+
+    reply = format_report(
+        profile["name"], report_date, meals, total,
+        supplements_scheduled, taken_with_names,
+    )
+    await update.message.reply_text(reply)
+
+
+# ---------------------------------------------------------------------------
+# Exported for scheduler
+# ---------------------------------------------------------------------------
+
+
+async def send_daily_summary(bot, owner_id: int, profile: dict) -> None:
+    """Send the daily summary to *owner_id* for *profile*.
+
+    Called by the scheduler -- not by a user command.
+    """
+    meals = await db_sqlite.get_meals_today(profile["id"], owner_id)
+    totals = await db_sqlite.get_daily_totals(profile["id"], owner_id)
+    goal = await db_sqlite.get_goal(profile["id"])
+
+    text = format_summary(profile["name"], meals, totals, goal)
+    await bot.send_message(chat_id=owner_id, text=text)
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
+
+def register(app) -> None:
+    app.add_handler(CommandHandler("summary", summary_cmd))
+    app.add_handler(CommandHandler("week", week_cmd))
+    app.add_handler(CommandHandler("report", report_cmd))

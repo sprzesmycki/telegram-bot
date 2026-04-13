@@ -1,0 +1,283 @@
+from __future__ import annotations
+
+import logging
+import re
+
+from telegram import Update
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
+
+from bot.handlers.profiles import get_target_profiles
+from bot.services import db_postgres, db_sqlite
+from bot.utils.formatting import format_supplement_list, parse_target
+
+logger = logging.getLogger(__name__)
+
+_TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
+
+USAGE = (
+    "Usage:\n"
+    "/supplement add <name> <HH:MM> [dose] [@profile]\n"
+    "/supplement list [@profile]\n"
+    "/supplement done <name> [@profile]\n"
+    "/supplement remove <name> [@profile]"
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_single_profile(owner_id: int, text: str) -> dict | None:
+    profiles = await get_target_profiles(owner_id, text)
+    return profiles[0] if profiles else None
+
+
+# ---------------------------------------------------------------------------
+# /supplement command
+# ---------------------------------------------------------------------------
+
+
+async def supplement_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    owner_id = update.effective_user.id
+    args = context.args or []
+    text = update.message.text or ""
+
+    if not args:
+        await update.message.reply_text(USAGE)
+        return
+
+    sub = args[0].lower()
+
+    if sub == "add":
+        await _supplement_add(update, context, owner_id, args, text)
+    elif sub == "list":
+        await _supplement_list(update, owner_id, text)
+    elif sub == "done":
+        await _supplement_done(update, owner_id, args, text)
+    elif sub == "remove":
+        await _supplement_remove(update, context, owner_id, args, text)
+    else:
+        await update.message.reply_text(USAGE)
+
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+
+async def _supplement_add(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    owner_id: int,
+    args: list[str],
+    text: str,
+) -> None:
+    # /supplement add <name> <HH:MM> [dose] [@profile]
+    if len(args) < 3:
+        await update.message.reply_text("Usage: /supplement add <name> <HH:MM> [dose] [@profile]")
+        return
+
+    name = args[1]
+    reminder_time = args[2]
+
+    if not _TIME_RE.match(reminder_time):
+        await update.message.reply_text("Invalid time format. Use HH:MM (e.g. 09:00).")
+        return
+
+    # Optional dose: next arg if present and not a @profile token
+    dose = args[3] if len(args) >= 4 and not args[3].startswith("@") else None
+
+    profile = await _resolve_single_profile(owner_id, text)
+    if profile is None:
+        await update.message.reply_text("Profile not found.")
+        return
+
+    supplement_id = await db_sqlite.add_supplement(
+        profile["id"], owner_id, name, reminder_time, dose,
+    )
+    await db_postgres.mirror_add_supplement(
+        supplement_id, profile["id"], owner_id, name, reminder_time, dose,
+    )
+
+    # Register scheduler job if scheduler is available
+    scheduler = context.bot_data.get("scheduler")
+    if scheduler is not None:
+        try:
+            from bot.services.scheduler import register_supplement_reminder
+
+            supplement_dict = {
+                "id": supplement_id,
+                "profile_id": profile["id"],
+                "name": name,
+                "reminder_time": reminder_time,
+                "dose": dose,
+                "owner_user_id": owner_id,
+                "profile_name": profile["name"],
+            }
+            register_supplement_reminder(scheduler, context.bot, supplement_dict)
+        except Exception:
+            logger.warning("Could not register scheduler reminder", exc_info=True)
+
+    dose_part = f" ({dose})" if dose else ""
+    await update.message.reply_text(
+        f"Supplement '{name}'{dose_part} added at {reminder_time} for {profile['name']}."
+    )
+
+
+async def _supplement_list(
+    update: Update, owner_id: int, text: str,
+) -> None:
+    profile = await _resolve_single_profile(owner_id, text)
+    if profile is None:
+        await update.message.reply_text("Profile not found.")
+        return
+
+    supplements = await db_sqlite.list_supplements(profile["id"], owner_id)
+    if not supplements:
+        await update.message.reply_text(f"No supplements for {profile['name']}.")
+        return
+
+    reply = format_supplement_list(supplements)
+    await update.message.reply_text(reply)
+
+
+async def _supplement_done(
+    update: Update, owner_id: int, args: list[str], text: str,
+) -> None:
+    if len(args) < 2:
+        await update.message.reply_text("Usage: /supplement done <name> [@profile]")
+        return
+
+    name = args[1]
+    profile = await _resolve_single_profile(owner_id, text)
+    if profile is None:
+        await update.message.reply_text("Profile not found.")
+        return
+
+    supplement = await db_sqlite.get_supplement_by_name(profile["id"], owner_id, name)
+    if supplement is None:
+        await update.message.reply_text(f"Supplement '{name}' not found.")
+        return
+
+    await db_sqlite.log_supplement_taken(supplement["id"], profile["id"])
+    # Mirror — pass 0 as log_id since we don't track it; ON CONFLICT handles dupes
+    await db_postgres.mirror_log_supplement_taken(0, supplement["id"], profile["id"])
+
+    await update.message.reply_text(
+        f"{name} marked as taken for {profile['name']}."
+    )
+
+
+async def _supplement_remove(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    owner_id: int,
+    args: list[str],
+    text: str,
+) -> None:
+    if len(args) < 2:
+        await update.message.reply_text("Usage: /supplement remove <name> [@profile]")
+        return
+
+    name = args[1]
+    profile = await _resolve_single_profile(owner_id, text)
+    if profile is None:
+        await update.message.reply_text("Profile not found.")
+        return
+
+    supplement = await db_sqlite.get_supplement_by_name(profile["id"], owner_id, name)
+    if supplement is None:
+        await update.message.reply_text(f"Supplement '{name}' not found.")
+        return
+
+    removed = await db_sqlite.remove_supplement(profile["id"], owner_id, name)
+    if removed:
+        await db_postgres.mirror_remove_supplement(profile["id"], owner_id, name)
+
+        # Remove scheduler job
+        scheduler = context.bot_data.get("scheduler")
+        if scheduler is not None:
+            try:
+                from bot.services.scheduler import remove_supplement_reminder
+
+                remove_supplement_reminder(scheduler, supplement["id"])
+            except Exception:
+                logger.warning("Could not remove scheduler reminder", exc_info=True)
+
+        await update.message.reply_text(
+            f"Supplement '{name}' removed for {profile['name']}."
+        )
+    else:
+        await update.message.reply_text(f"Supplement '{name}' not found.")
+
+
+# ---------------------------------------------------------------------------
+# Inline-button callback  (✅ Took it / 🔔 +1h / ❌ Skip)
+# ---------------------------------------------------------------------------
+
+
+async def supplement_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle button presses on supplement reminder messages."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        parts = query.data.split(":")
+        action = parts[0]
+        supplement_id = int(parts[1])
+        profile_id = int(parts[2])
+    except (IndexError, ValueError):
+        logger.error("Invalid supplement callback data: %s", query.data)
+        return
+
+    owner_id = update.effective_user.id
+
+    if action == "sd":
+        await db_sqlite.log_supplement_taken(supplement_id, profile_id)
+        await db_postgres.mirror_log_supplement_taken(0, supplement_id, profile_id)
+        await query.edit_message_text("\u2705 Marked as taken!")
+
+    elif action == "ss":
+        supplement = await db_sqlite.get_supplement_by_id(supplement_id)
+        if supplement is None:
+            await query.edit_message_text("Supplement not found.")
+            return
+        scheduler = context.bot_data.get("scheduler")
+        if scheduler is not None:
+            from bot.services.scheduler import schedule_snooze_reminder
+            schedule_snooze_reminder(scheduler, context.bot, supplement, owner_id)
+            await query.edit_message_text("\U0001f514 Will remind you in 1 hour.")
+        else:
+            await query.edit_message_text("Scheduler unavailable — please try again later.")
+
+    elif action == "sx":
+        await query.edit_message_text("\u274c Skipped.")
+
+
+# ---------------------------------------------------------------------------
+# Exported for startup
+# ---------------------------------------------------------------------------
+
+
+async def register_existing_reminders(scheduler, bot) -> None:
+    """Load all active supplements from the DB and register scheduler jobs.
+
+    Called once at bot startup.
+    """
+    from bot.services.scheduler import register_supplement_reminder
+
+    supplements = await db_sqlite.get_all_active_supplements()
+    for sup in supplements:
+        register_supplement_reminder(scheduler, bot, sup)
+    logger.info("Registered %d supplement reminders from DB", len(supplements))
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
+
+def register(app) -> None:
+    app.add_handler(CommandHandler("supplement", supplement_cmd))
+    app.add_handler(CallbackQueryHandler(supplement_callback, pattern=r"^s[dsx]:"))

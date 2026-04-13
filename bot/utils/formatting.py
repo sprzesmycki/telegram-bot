@@ -1,0 +1,331 @@
+from __future__ import annotations
+
+import re
+from datetime import datetime, date, time
+
+
+# ---------------------------------------------------------------------------
+# Format helpers
+# ---------------------------------------------------------------------------
+
+def format_meal_preview(
+    description: str,
+    cals: int,
+    protein: float,
+    carbs: float,
+    fat: float,
+    profile_names: list[str],
+    eaten_at: datetime,
+) -> str:
+    """Pre-log preview shown before the user approves or refines."""
+    target = ", ".join(profile_names) if profile_names else "(no profile)"
+    time_str = eaten_at.strftime("%H:%M")
+    return (
+        f"Preview — will log to: {target} at {time_str}\n"
+        f"{description}\n"
+        f"{cals} kcal | P: {protein:g}g | C: {carbs:g}g | F: {fat:g}g\n"
+        "\n"
+        "Reply /yes to log, or send a remark to refine.\n"
+        'Example: "actually larger portion" or "add a tablespoon of butter".'
+    )
+
+
+def format_recipe_preview(
+    dish_name: str,
+    per_serving: dict,
+    total: dict,
+    servings: int,
+    profile_names: list[str],
+) -> str:
+    """Pre-log preview for a recipe."""
+    target = ", ".join(profile_names) if profile_names else "(no profile)"
+    return (
+        f"Recipe: {dish_name} ({servings} servings)\n"
+        "\n"
+        f"Per serving: {per_serving['calories']} kcal | "
+        f"P: {per_serving['protein_g']:g}g | "
+        f"C: {per_serving['carbs_g']:g}g | "
+        f"F: {per_serving['fat_g']:g}g\n"
+        f"Whole dish: {total['calories']} kcal | "
+        f"P: {total['protein_g']:g}g | "
+        f"C: {total['carbs_g']:g}g | "
+        f"F: {total['fat_g']:g}g\n"
+        "\n"
+        f"Target: {target}. Reply /yes to log one serving, "
+        "or send a remark to refine."
+    )
+
+
+def format_meal_logged(
+    profile_name: str,
+    description: str,
+    cals: int,
+    protein: float,
+    carbs: float,
+    fat: float,
+    daily_total: int,
+    goal: int,
+) -> str:
+    diff = daily_total - goal
+    if diff > 0:
+        remaining_part = f"({diff} over goal)"
+    else:
+        remaining_part = f"({goal - daily_total} remaining)"
+
+    return (
+        f"[{profile_name}] Logged: {description}\n"
+        f"Calories: {cals} kcal | P: {protein:g}g | C: {carbs:g}g | F: {fat:g}g\n"
+        f"Daily total: {daily_total} / {goal} kcal {remaining_part}"
+    )
+
+
+def _format_eaten_at(eaten_at: str | datetime) -> str:
+    """Return HH:MM from a datetime object or a string."""
+    if isinstance(eaten_at, datetime):
+        return eaten_at.strftime("%H:%M")
+    # Try common ISO-ish formats
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M",
+    ):
+        try:
+            return datetime.strptime(eaten_at, fmt).strftime("%H:%M")
+        except (ValueError, TypeError):
+            continue
+    # Fallback via datetime.fromisoformat (handles more ISO variants)
+    try:
+        return datetime.fromisoformat(eaten_at).strftime("%H:%M")
+    except (ValueError, TypeError):
+        pass
+    # Already HH:MM or something short
+    return str(eaten_at)
+
+
+def format_summary(
+    profile_name: str,
+    meals: list[dict],
+    total: dict,
+    goal: int,
+) -> str:
+    lines: list[str] = [f"Daily Summary for {profile_name}", ""]
+
+    for meal in meals:
+        t = _format_eaten_at(meal["eaten_at"])
+        lines.append(f"{t} - {meal['description']} \u2014 {meal['calories']} kcal")
+
+    lines.append("")
+    lines.append(f"Totals: {total['calories']} / {goal} kcal")
+    lines.append(
+        f"Protein: {total['protein_g']:g}g | "
+        f"Carbs: {total['carbs_g']:g}g | "
+        f"Fat: {total['fat_g']:g}g"
+    )
+    return "\n".join(lines)
+
+
+def format_week(
+    profile_name: str,
+    daily_data: list[dict],
+    goal: int,
+) -> str:
+    lines: list[str] = [f"Weekly Summary for {profile_name}", ""]
+
+    total_cals = 0
+    count = 0
+    for day in daily_data:
+        cals = day["calories"]
+        total_cals += cals
+        count += 1
+        diff = cals - goal
+        if diff > 0:
+            note = f"({diff} over goal)"
+        elif diff < 0:
+            note = f"({-diff} under goal)"
+        else:
+            note = "(on goal)"
+        lines.append(f"{day['date']}: {cals} kcal {note}")
+
+    avg = round(total_cals / count) if count else 0
+    lines.append("")
+    lines.append(f"Weekly average: {avg} kcal/day")
+    return "\n".join(lines)
+
+
+def format_report(
+    profile_name: str,
+    date: str,
+    meals: list[dict],
+    total: dict,
+    supplements_scheduled: list[dict],
+    supplements_taken: list[dict],
+) -> str:
+    taken_names: set[str] = set()
+    for s in supplements_taken:
+        taken_names.add(s.get("name") or s.get("supplement_id", ""))
+
+    lines: list[str] = [
+        "Nutrition Report",
+        f"Profile: {profile_name}",
+        f"Date: {date}",
+        "",
+        "--- Meals ---",
+    ]
+
+    for meal in meals:
+        t = _format_eaten_at(meal["eaten_at"])
+        lines.append(f"{t}  {meal['description']}")
+        lines.append(
+            f"       Calories: {meal['calories']} | "
+            f"Protein: {meal.get('protein_g', 0):g}g | "
+            f"Carbs: {meal.get('carbs_g', 0):g}g | "
+            f"Fat: {meal.get('fat_g', 0):g}g"
+        )
+        lines.append("")
+
+    lines.append("--- Daily Totals ---")
+    lines.append(f"Calories: {total['calories']}")
+    lines.append(
+        f"Protein: {total['protein_g']:g}g | "
+        f"Carbs: {total['carbs_g']:g}g | "
+        f"Fat: {total['fat_g']:g}g"
+    )
+    lines.append(f"Goal: {total.get('goal', '')} kcal" if "goal" in total else "")
+
+    lines.append("")
+    lines.append("--- Supplements ---")
+    for sup in supplements_scheduled:
+        name = sup["name"]
+        reminder = sup["reminder_time"]
+        dose_str = f" ({sup['dose']})" if sup.get("dose") else ""
+        check = "x" if name in taken_names else " "
+        lines.append(f"[{check}] {name}{dose_str} ({reminder})")
+
+    return "\n".join(lines)
+
+
+def format_profile_list(
+    profiles: list[dict],
+    active_id: int | None,
+) -> str:
+    lines: list[str] = ["Your profiles:"]
+    for p in profiles:
+        marker = "\u2713 " if p["id"] == active_id else "  "
+        lines.append(f"{marker}{p['name']}")
+    return "\n".join(lines)
+
+
+def format_supplement_list(supplements: list[dict]) -> str:
+    lines: list[str] = ["Supplements:"]
+    for s in supplements:
+        dose_str = f" ({s['dose']})" if s.get("dose") else ""
+        lines.append(f"  {s['name']}{dose_str} \u2014 {s['reminder_time']}")
+    return "\n".join(lines)
+
+
+def format_help() -> str:
+    return (
+        "Available commands:\n"
+        "\n"
+        "/cal <description> [@name] [at HH:MM]\n"
+        "  Analyse a meal and show a preview. Send a remark to refine, or\n"
+        "  /yes to log. Send a photo with optional caption for vision mode.\n"
+        "\n"
+        "/recipe <description> [for N]\n"
+        "  Analyse a recipe and show a preview. Same refine/confirm flow.\n"
+        "\n"
+        "/summary [@name]\n"
+        "  Show today's meal summary for a profile.\n"
+        "\n"
+        "/week [@name]\n"
+        "  Show the weekly calorie overview.\n"
+        "\n"
+        "/report [@name]\n"
+        "  Generate a dietitian-ready daily report.\n"
+        "\n"
+        "/goal <calories> [@name]\n"
+        "  Set the daily calorie goal for a profile.\n"
+        "\n"
+        "/profile [add|remove|switch] <name>\n"
+        "  Manage tracked profiles.\n"
+        "\n"
+        "/supplement [add|remove|list] <name> [at HH:MM]\n"
+        "  Manage supplement reminders.\n"
+        "\n"
+        "/model [model_name]\n"
+        "  View or change the AI model used for estimation.\n"
+        "\n"
+        "/yes\n"
+        "  Confirm and log the pending meal/recipe preview."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parser helpers
+# ---------------------------------------------------------------------------
+
+_TARGET_RE = re.compile(r"@(\w+)", re.IGNORECASE)
+_TIME_RE = re.compile(r"\bat\s+(\d{1,2}:\d{2})\b", re.IGNORECASE)
+_SERVINGS_RE = re.compile(r"\bfor\s+(\d+)\b", re.IGNORECASE)
+
+
+def parse_target(text: str) -> tuple[str | None, bool]:
+    """Extract ``@name`` or ``@both`` from *text*.
+
+    Returns
+    -------
+    tuple[str | None, bool]
+        ``(profile_name, is_both)``
+        - ``@both`` (case-insensitive) -> ``(None, True)``
+        - ``@SomeName``               -> ``("SomeName", False)``
+        - no match                    -> ``(None, False)``
+
+    The matched ``@target`` token is **not** stripped from *text*; use
+    :func:`strip_command_args` to obtain the bare description.
+    """
+    m = _TARGET_RE.search(text)
+    if m is None:
+        return (None, False)
+    name = m.group(1)
+    if name.lower() == "both":
+        return (None, True)
+    return (name, False)
+
+
+def parse_time(text: str) -> datetime | None:
+    """Extract ``at HH:MM`` from *text* and return a datetime for today.
+
+    Returns ``None`` when no match is found.
+    """
+    m = _TIME_RE.search(text)
+    if m is None:
+        return None
+    parts = m.group(1).split(":")
+    h, mi = int(parts[0]), int(parts[1])
+    try:
+        return datetime.combine(date.today(), time(h, mi))
+    except ValueError:
+        return None
+
+
+def parse_servings(text: str) -> int | None:
+    """Extract ``for N`` from *text* and return the integer, or ``None``."""
+    m = _SERVINGS_RE.search(text)
+    if m is None:
+        return None
+    return int(m.group(1))
+
+
+def strip_command_args(text: str) -> str:
+    """Strip ``@target``, ``at HH:MM``, and ``for N`` from *text*.
+
+    Returns the remaining text (the food/recipe description) with collapsed
+    whitespace.
+    """
+    text = _TARGET_RE.sub("", text)
+    text = _TIME_RE.sub("", text)
+    text = _SERVINGS_RE.sub("", text)
+    return " ".join(text.split())
