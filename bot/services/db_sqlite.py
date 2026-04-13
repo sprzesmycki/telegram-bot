@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import aiosqlite
@@ -325,6 +326,46 @@ async def get_liquids_today(profile_id: int, owner_id: int) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+async def delete_meal(meal_id: int, owner_id: int) -> bool:
+    db = get_db()
+    cursor = await db.execute(
+        "DELETE FROM meals WHERE id = ? AND owner_user_id = ?",
+        (meal_id, owner_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def delete_liquid(liquid_id: int, owner_id: int) -> bool:
+    db = get_db()
+    cursor = await db.execute(
+        "DELETE FROM liquids WHERE id = ? AND owner_user_id = ?",
+        (liquid_id, owner_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def get_meal_by_id(meal_id: int, owner_id: int) -> dict | None:
+    db = get_db()
+    cursor = await db.execute(
+        "SELECT * FROM meals WHERE id = ? AND owner_user_id = ?",
+        (meal_id, owner_id),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_liquid_by_id(liquid_id: int, owner_id: int) -> dict | None:
+    db = get_db()
+    cursor = await db.execute(
+        "SELECT * FROM liquids WHERE id = ? AND owner_user_id = ?",
+        (liquid_id, owner_id),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
 async def get_liquids_range(
     profile_id: int, owner_id: int, start: str, end: str
 ) -> list[dict]:
@@ -573,3 +614,369 @@ async def get_supplement_by_name(
     )
     row = await cursor.fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Piano: sessions
+# ---------------------------------------------------------------------------
+
+def _load_pieces_json(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+async def log_piano_session(
+    owner_id: int,
+    practiced_at: date,
+    duration_minutes: int | None,
+    notes: str | None,
+    pieces_practiced: list[str],
+) -> int:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        INSERT INTO piano_sessions
+            (owner_user_id, practiced_at, duration_minutes, notes, pieces_practiced)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            owner_id,
+            practiced_at.isoformat(),
+            duration_minutes,
+            notes,
+            json.dumps(pieces_practiced or []),
+        ),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+def _session_row_to_dict(row: aiosqlite.Row) -> dict:
+    data = dict(row)
+    data["pieces_practiced"] = _load_pieces_json(data.get("pieces_practiced"))
+    return data
+
+
+async def list_piano_sessions(owner_id: int, limit: int = 7) -> list[dict]:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        SELECT * FROM piano_sessions
+        WHERE owner_user_id = ?
+        ORDER BY practiced_at DESC, logged_at DESC
+        LIMIT ?
+        """,
+        (owner_id, limit),
+    )
+    rows = await cursor.fetchall()
+    return [_session_row_to_dict(row) for row in rows]
+
+
+async def get_piano_session_today(owner_id: int) -> dict | None:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        SELECT * FROM piano_sessions
+        WHERE owner_user_id = ?
+          AND practiced_at = date('now', 'localtime')
+        ORDER BY logged_at DESC
+        LIMIT 1
+        """,
+        (owner_id,),
+    )
+    row = await cursor.fetchone()
+    return _session_row_to_dict(row) if row else None
+
+
+async def piano_total_stats(owner_id: int) -> dict:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        SELECT
+            COUNT(*) AS total_sessions,
+            COALESCE(SUM(duration_minutes), 0) AS total_minutes
+        FROM piano_sessions
+        WHERE owner_user_id = ?
+        """,
+        (owner_id,),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else {"total_sessions": 0, "total_minutes": 0}
+
+
+async def get_piano_owners() -> list[int]:
+    """Return distinct owner IDs that have ever logged a piano session OR piece."""
+    db = get_db()
+    cursor = await db.execute(
+        """
+        SELECT DISTINCT owner_user_id FROM piano_sessions
+        UNION
+        SELECT DISTINCT owner_user_id FROM piano_pieces
+        """
+    )
+    rows = await cursor.fetchall()
+    return [int(row[0] if isinstance(row, tuple) else row["owner_user_id"]) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Piano: pieces
+# ---------------------------------------------------------------------------
+
+async def add_piano_piece(
+    owner_id: int, title: str, composer: str | None = None
+) -> int:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        INSERT INTO piano_pieces (owner_user_id, title, composer)
+        VALUES (?, ?, ?)
+        """,
+        (owner_id, title, composer),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+async def remove_piano_piece(owner_id: int, piece_id: int) -> bool:
+    db = get_db()
+    cursor = await db.execute(
+        "DELETE FROM piano_pieces WHERE id = ? AND owner_user_id = ?",
+        (piece_id, owner_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def list_piano_pieces(
+    owner_id: int, status: str | None = None
+) -> list[dict]:
+    db = get_db()
+    if status is None:
+        cursor = await db.execute(
+            """
+            SELECT * FROM piano_pieces
+            WHERE owner_user_id = ?
+            ORDER BY status, title
+            """,
+            (owner_id,),
+        )
+    else:
+        cursor = await db.execute(
+            """
+            SELECT * FROM piano_pieces
+            WHERE owner_user_id = ? AND status = ?
+            ORDER BY title
+            """,
+            (owner_id, status),
+        )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def find_piano_piece_by_title(
+    owner_id: int, title: str
+) -> dict | None:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        SELECT * FROM piano_pieces
+        WHERE owner_user_id = ? AND LOWER(title) = LOWER(?)
+        LIMIT 1
+        """,
+        (owner_id, title),
+    )
+    row = await cursor.fetchone()
+    if row:
+        return dict(row)
+    cursor = await db.execute(
+        """
+        SELECT * FROM piano_pieces
+        WHERE owner_user_id = ? AND LOWER(title) LIKE LOWER(?)
+        ORDER BY LENGTH(title)
+        LIMIT 1
+        """,
+        (owner_id, f"%{title}%"),
+    )
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def update_piano_piece_status(
+    owner_id: int, piece_id: int, status: str
+) -> bool:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        UPDATE piano_pieces SET status = ?
+        WHERE id = ? AND owner_user_id = ?
+        """,
+        (status, piece_id, owner_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def update_piano_piece_note(
+    owner_id: int, piece_id: int, notes: str
+) -> bool:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        UPDATE piano_pieces SET notes = ?
+        WHERE id = ? AND owner_user_id = ?
+        """,
+        (notes, piece_id, owner_id),
+    )
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def touch_piano_piece_last_practiced(
+    owner_id: int, piece_id: int, practiced_at: date
+) -> None:
+    db = get_db()
+    await db.execute(
+        """
+        UPDATE piano_pieces SET last_practiced_at = ?
+        WHERE id = ? AND owner_user_id = ?
+        """,
+        (practiced_at.isoformat(), piece_id, owner_id),
+    )
+    await db.commit()
+
+
+async def most_practiced_piece(owner_id: int) -> dict | None:
+    """Return the piece that appears most often across piano_sessions.pieces_practiced.
+
+    Counts occurrences in Python — piano data volume is tiny, so no need for
+    JSON-aware SQL.
+    """
+    sessions = await list_piano_sessions(owner_id, limit=1000)
+    if not sessions:
+        return None
+
+    counts: dict[str, int] = {}
+    for session in sessions:
+        for name in session["pieces_practiced"] or []:
+            key = name.strip()
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+
+    if not counts:
+        return None
+
+    top_title, top_count = max(counts.items(), key=lambda kv: kv[1])
+    piece = await find_piano_piece_by_title(owner_id, top_title)
+    return {
+        "title": (piece["title"] if piece else top_title),
+        "composer": piece["composer"] if piece else None,
+        "count": top_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Piano: streak
+# ---------------------------------------------------------------------------
+
+async def get_piano_streak(owner_id: int) -> dict:
+    db = get_db()
+    cursor = await db.execute(
+        "SELECT * FROM piano_streak WHERE owner_user_id = ?",
+        (owner_id,),
+    )
+    row = await cursor.fetchone()
+    if row:
+        return dict(row)
+    return {
+        "owner_user_id": owner_id,
+        "current_streak": 0,
+        "longest_streak": 0,
+        "last_practiced_date": None,
+    }
+
+
+async def upsert_piano_streak(
+    owner_id: int,
+    current_streak: int,
+    longest_streak: int,
+    last_practiced_date: date | None,
+) -> None:
+    db = get_db()
+    await db.execute(
+        """
+        INSERT INTO piano_streak
+            (owner_user_id, current_streak, longest_streak, last_practiced_date)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(owner_user_id) DO UPDATE SET
+            current_streak = excluded.current_streak,
+            longest_streak = excluded.longest_streak,
+            last_practiced_date = excluded.last_practiced_date
+        """,
+        (
+            owner_id,
+            current_streak,
+            longest_streak,
+            last_practiced_date.isoformat() if last_practiced_date else None,
+        ),
+    )
+    await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Piano: recordings
+# ---------------------------------------------------------------------------
+
+async def add_piano_recording(
+    owner_id: int,
+    piece_id: int | None,
+    file_path: str | None,
+    duration_seconds: int | None,
+    feedback_summary: str | None,
+    raw_analysis: str | None,
+) -> int:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        INSERT INTO piano_recordings
+            (owner_user_id, piece_id, file_path, duration_seconds,
+             feedback_summary, raw_analysis)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (owner_id, piece_id, file_path, duration_seconds, feedback_summary, raw_analysis),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+async def list_piano_recordings(
+    owner_id: int, piece_id: int | None = None, limit: int = 10
+) -> list[dict]:
+    db = get_db()
+    if piece_id is None:
+        cursor = await db.execute(
+            """
+            SELECT * FROM piano_recordings
+            WHERE owner_user_id = ?
+            ORDER BY recorded_at DESC
+            LIMIT ?
+            """,
+            (owner_id, limit),
+        )
+    else:
+        cursor = await db.execute(
+            """
+            SELECT * FROM piano_recordings
+            WHERE owner_user_id = ? AND piece_id = ?
+            ORDER BY recorded_at DESC
+            LIMIT ?
+            """,
+            (owner_id, piece_id, limit),
+        )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]

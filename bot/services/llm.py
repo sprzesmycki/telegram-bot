@@ -71,11 +71,19 @@ def init_llm() -> None:
     logger.debug("LLM initialised: provider=%s model=%s", _current_provider, _current_model)
 
 
-def get_llm_client() -> tuple[AsyncOpenAI, str]:
-    """Return the current (client, model) pair, initialising if needed."""
+def get_llm_client(model_override: str | None = None) -> tuple[AsyncOpenAI, str]:
+    """Return the current (client, model) pair, initialising if needed.
+
+    When *model_override* is provided, return the current client paired with
+    that model name instead of the globally-active one. The client itself
+    (base_url, api_key) is not swapped — only the model string passed on each
+    request changes. This lets piano handlers pin their own model tier without
+    mutating the global state touched by /model.
+    """
     if _current_client is None:
         init_llm()
-    return _current_client, _current_model  # type: ignore[return-value]
+    model = model_override or _current_model
+    return _current_client, model  # type: ignore[return-value]
 
 
 def switch_provider(provider: str, model_override: str | None = None) -> None:

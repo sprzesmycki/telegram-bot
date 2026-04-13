@@ -108,7 +108,7 @@ def format_meal_logged(
 
     return (
         f"[{profile_name}] Logged: {description}\n"
-        f"{cals} kcal | P: {protein:g}g | C: {carbs_g:g}g | F: {fat:g}g\n"
+        f"{cals} kcal | P: {protein:g}g | C: {carbs:g}g | F: {fat:g}g\n"
         f"Daily: {total_cals} / {goal_cals} kcal {remaining_part}\n"
         f"{protein_line} | {carbs_line} | {fat_line}"
     )

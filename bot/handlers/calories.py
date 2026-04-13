@@ -9,8 +9,14 @@ from datetime import datetime
 import httpx
 import openai
 from bs4 import BeautifulSoup
-from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from bot.handlers.profiles import get_target_profiles
 from bot.services import db_postgres, db_sqlite
@@ -498,6 +504,145 @@ async def yes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /today  (list today's meals & liquids with inline delete buttons)
+# ---------------------------------------------------------------------------
+
+
+def _fmt_hhmm(iso_ts: str | None) -> str:
+    """Extract HH:MM from a stored timestamp; fall back to '?' on oddities."""
+    if not iso_ts:
+        return "?"
+    try:
+        return datetime.fromisoformat(iso_ts).strftime("%H:%M")
+    except ValueError:
+        return iso_ts[11:16] if len(iso_ts) >= 16 else iso_ts
+
+
+def _short(text: str, limit: int = 60) -> str:
+    cleaned = (text or "").replace("\n", " ").strip()
+    return cleaned if len(cleaned) <= limit else cleaned[: limit - 1] + "\u2026"
+
+
+async def _build_today_view(
+    profile: dict, owner_id: int,
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Build the text + inline keyboard for one profile's /today list."""
+    meals = await db_sqlite.get_meals_today(profile["id"], owner_id)
+    liquids = await db_sqlite.get_liquids_today(profile["id"], owner_id)
+
+    if not meals and not liquids:
+        return (f"[{profile['name']}] No entries logged today.", None)
+
+    entries: list[tuple[str, str, int, str]] = []
+    for m in meals:
+        entries.append((
+            _fmt_hhmm(m.get("eaten_at")),
+            _short(m.get("description") or ""),
+            int(m.get("calories") or 0),
+            f"delm:{m['id']}",
+        ))
+    for l in liquids:
+        amount = int(l.get("amount_ml") or 0)
+        desc = _short(l.get("description") or "")
+        label = f"{desc} ({amount} ml)" if amount else desc
+        entries.append((
+            _fmt_hhmm(l.get("drunk_at")),
+            label,
+            int(l.get("calories") or 0),
+            f"dell:{l['id']}",
+        ))
+
+    entries.sort(key=lambda e: e[0])
+
+    totals = await db_sqlite.get_daily_totals(profile["id"], owner_id)
+
+    lines = [f"[{profile['name']}] Today"]
+    buttons: list[InlineKeyboardButton] = []
+    for idx, (ts, label, cals, cb_data) in enumerate(entries, start=1):
+        lines.append(f"{idx}. {ts}  {label}  —  {cals} kcal")
+        buttons.append(InlineKeyboardButton(f"\u274c {idx}", callback_data=cb_data))
+
+    lines.append("")
+    lines.append(
+        f"Total: {int(totals.get('calories') or 0)} kcal | "
+        f"P: {float(totals.get('protein_g') or 0):g}g | "
+        f"C: {float(totals.get('carbs_g') or 0):g}g | "
+        f"F: {float(totals.get('fat_g') or 0):g}g"
+    )
+
+    rows = [buttons[i : i + 4] for i in range(0, len(buttons), 4)]
+    return ("\n".join(lines), InlineKeyboardMarkup(rows) if rows else None)
+
+
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    owner_id = update.effective_user.id
+    text = update.message.text or ""
+
+    profiles = await get_target_profiles(owner_id, text)
+    if not profiles:
+        await update.message.reply_text("Profile not found.")
+        return
+
+    for profile in profiles:
+        body, keyboard = await _build_today_view(profile, owner_id)
+        await update.message.reply_text(body, reply_markup=keyboard)
+
+
+async def today_delete_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    owner_id = update.effective_user.id
+    try:
+        action, raw_id = query.data.split(":", 1)
+        entry_id = int(raw_id)
+    except (ValueError, AttributeError):
+        logger.error("Invalid today-delete callback data: %s", query.data)
+        return
+
+    profile: dict | None = None
+    removed_label = ""
+
+    if action == "delm":
+        meal = await db_sqlite.get_meal_by_id(entry_id, owner_id)
+        if meal is None:
+            await query.edit_message_text("Entry not found or already removed.")
+            return
+        await db_sqlite.delete_meal(entry_id, owner_id)
+        await db_postgres.mirror_delete_meal(entry_id, owner_id)
+        profile = {"id": meal["profile_id"], "name": ""}
+        removed_label = _short(meal.get("description") or "meal")
+    elif action == "dell":
+        liquid = await db_sqlite.get_liquid_by_id(entry_id, owner_id)
+        if liquid is None:
+            await query.edit_message_text("Entry not found or already removed.")
+            return
+        await db_sqlite.delete_liquid(entry_id, owner_id)
+        await db_postgres.mirror_delete_liquid(entry_id, owner_id)
+        profile = {"id": liquid["profile_id"], "name": ""}
+        removed_label = _short(liquid.get("description") or "liquid")
+    else:
+        return
+
+    # Resolve the proper profile name for the re-render header.
+    all_profiles = await db_sqlite.list_profiles(owner_id)
+    for p in all_profiles:
+        if p["id"] == profile["id"]:
+            profile = p
+            break
+
+    body, keyboard = await _build_today_view(profile, owner_id)
+    header = f"\u2705 Removed: {removed_label}\n\n"
+    try:
+        await query.edit_message_text(header + body, reply_markup=keyboard)
+    except Exception:
+        logger.debug("edit_message_text failed", exc_info=True)
+        await query.message.reply_text(header + body, reply_markup=keyboard)
+
+
+# ---------------------------------------------------------------------------
 # Refinement handler  (plain text = remark on the pending meal)
 # ---------------------------------------------------------------------------
 
@@ -508,6 +653,11 @@ async def refine_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     Silently no-ops when there's nothing pending -- users can chat freely
     until they start a /cal or /recipe flow.
     """
+    from bot.handlers.piano import piano_text_dispatch
+
+    if await piano_text_dispatch(update, context):
+        return
+
     pending = context.user_data.get("pending_meal")
     if not pending:
         return
@@ -557,6 +707,8 @@ def register(app) -> None:
     app.add_handler(CommandHandler("cal", cal_cmd))
     app.add_handler(CommandHandler("recipe", recipe_cmd))
     app.add_handler(CommandHandler("yes", yes_cmd))
+    app.add_handler(CommandHandler("today", today_cmd))
+    app.add_handler(CallbackQueryHandler(today_delete_callback, pattern=r"^del[ml]:"))
     # Photo handler must be registered after command handlers
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     # Refinement handler -- plain text is interpreted as a remark on the
