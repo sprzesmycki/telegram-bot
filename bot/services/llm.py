@@ -234,6 +234,78 @@ async def analyze_meal(description: str, image_base64: str | None = None) -> dic
 
 
 # ---------------------------------------------------------------------------
+# Liquid analysis
+# ---------------------------------------------------------------------------
+
+_LIQUID_SYSTEM = (
+    "You are a nutrition assistant specialized in liquids and hydration. "
+    "Always return valid JSON only, no markdown, no prose, no code fences. "
+    "Schema (ALL fields REQUIRED): "
+    '{"amount_ml": int, "calories": int, "protein_g": float, "carbs_g": float, '
+    '"fat_g": float, "description_en": str, "description_pl": str}. '
+    '"description_en" is a short English label for the drink (e.g. "Black coffee"). '
+    '"description_pl" is the SAME drink translated to Polish (e.g. "Czarna kawa"). '
+    "Always estimate numeric values, never refuse. "
+    "If the user doesn't specify an amount, assume a standard glass (250ml)."
+)
+
+
+async def analyze_liquid(description: str) -> dict:
+    """Analyse a drink from text.
+
+    Returns dict with keys: amount_ml, calories, protein_g, carbs_g, fat_g, description.
+    Raises ``LLMParseError`` when the model fails to return valid JSON.
+    """
+    client, model = get_llm_client()
+
+    messages: list[dict] = [
+        {"role": "system", "content": _LIQUID_SYSTEM},
+        {"role": "user", "content": description},
+    ]
+
+    logger.debug("analyze_liquid: model=%s", model)
+
+    response = await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.3,
+    )
+
+    content = response.choices[0].message.content or ""
+    logger.debug("analyze_liquid raw response: %s", content)
+
+    try:
+        return _combine_bilingual_description(_parse_json_response(content))
+    except json.JSONDecodeError:
+        logger.debug("analyze_liquid: first JSON parse failed, retrying")
+
+    # Retry once
+    messages.append({"role": "assistant", "content": content})
+    messages.append({
+        "role": "user",
+        "content": (
+            "Your previous response was not valid JSON. You MUST return valid "
+            "JSON only with both description_en and description_pl fields. "
+            "No markdown fences, no explanation."
+        ),
+    })
+
+    retry_response = await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.3,
+    )
+    retry_content = retry_response.choices[0].message.content or ""
+    logger.debug("analyze_liquid retry response: %s", retry_content)
+
+    try:
+        return _combine_bilingual_description(_parse_json_response(retry_content))
+    except json.JSONDecodeError as exc:
+        logger.error("analyze_liquid: JSON parse failed after retry: %s", retry_content)
+        raise LLMParseError(f"Failed to parse LLM response as JSON: {retry_content}") from exc
+
+
+# ---------------------------------------------------------------------------
 # Recipe analysis
 # ---------------------------------------------------------------------------
 

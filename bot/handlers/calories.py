@@ -19,12 +19,15 @@ from bot.services.llm import (
     VisionNotSupportedError,
     analyze_meal,
     analyze_recipe,
+    analyze_liquid,
     compress_image,
 )
 from bot.utils.formatting import (
     format_meal_logged,
     format_meal_preview,
     format_recipe_preview,
+    format_liquid_preview,
+    format_liquid_logged,
     parse_servings,
     parse_time,
     strip_command_args,
@@ -104,6 +107,91 @@ async def _log_and_reply(
         )
 
     await update.message.reply_text("\n\n".join(reply_parts))
+
+
+async def _log_liquid_and_reply(
+    update: Update,
+    owner_id: int,
+    profiles: list[dict],
+    drunk_at: datetime,
+    description: str,
+    amount_ml: int,
+    calories: int,
+    protein_g: float,
+    carbs_g: float,
+    fat_g: float,
+    raw_llm: str,
+) -> None:
+    """Log a drink for each profile, mirror to PG, and send a reply."""
+    reply_parts: list[str] = []
+
+    for profile in profiles:
+        profile_id = profile["id"]
+        profile_name = profile["name"]
+
+        liquid_id = await db_sqlite.log_liquid(
+            profile_id=profile_id,
+            owner_id=owner_id,
+            drunk_at=drunk_at,
+            description=description,
+            amount_ml=amount_ml,
+            calories=calories,
+            protein_g=protein_g,
+            carbs_g=carbs_g,
+            fat_g=fat_g,
+            raw_llm=raw_llm,
+        )
+        await db_postgres.mirror_log_liquid(
+            liquid_id=liquid_id,
+            profile_id=profile_id,
+            owner_id=owner_id,
+            drunk_at=drunk_at,
+            description=description,
+            amount_ml=amount_ml,
+            calories=calories,
+            protein_g=protein_g,
+            carbs_g=carbs_g,
+            fat_g=fat_g,
+            raw_llm=raw_llm,
+        )
+
+        totals = await db_sqlite.get_daily_totals(profile_id, owner_id)
+        goal = await db_sqlite.get_goal(profile_id)
+        hydration = await db_sqlite.get_daily_hydration(profile_id, owner_id)
+
+        reply_parts.append(
+            format_liquid_logged(
+                profile_name=profile_name,
+                description=description,
+                amount_ml=amount_ml,
+                cals=calories,
+                protein=protein_g,
+                carbs=carbs_g,
+                fat=fat_g,
+                daily_total=totals,
+                goal=goal,
+                hydration_ml=hydration,
+            )
+        )
+
+    await update.message.reply_text("\n\n".join(reply_parts))
+
+
+async def _send_liquid_preview(update: Update, pending: dict) -> None:
+    """Format and send the current pending_liquid preview."""
+    result = pending["result"]
+    await update.message.reply_text(
+        format_liquid_preview(
+            description=result["description"],
+            amount_ml=result["amount_ml"],
+            cals=result["calories"],
+            protein=result["protein_g"],
+            carbs=result["carbs_g"],
+            fat=result["fat_g"],
+            profile_names=[p["name"] for p in pending["profiles"]],
+            drunk_at=pending["drunk_at"],
+        )
+    )
 
 
 async def _send_meal_preview(update: Update, pending: dict) -> None:
@@ -391,6 +479,20 @@ async def yes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             fat_g=result["per_serving"]["fat_g"],
             raw_llm=json.dumps(result),
         )
+    elif kind == "liquid":
+        await _log_liquid_and_reply(
+            update=update,
+            owner_id=pending["owner_id"],
+            profiles=pending["profiles"],
+            drunk_at=pending["drunk_at"],
+            description=result["description"],
+            amount_ml=result["amount_ml"],
+            calories=result["calories"],
+            protein_g=result["protein_g"],
+            carbs_g=result["carbs_g"],
+            fat_g=result["fat_g"],
+            raw_llm=json.dumps(result),
+        )
 
     del context.user_data["pending_meal"]
 
@@ -435,6 +537,10 @@ async def refine_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             pending["result"] = result
             await _send_recipe_preview(update, pending)
+        elif pending["kind"] == "liquid":
+            result = await analyze_liquid(pending["description"])
+            pending["result"] = result
+            await _send_liquid_preview(update, pending)
     except Exception as exc:
         msg = _handle_llm_error(exc)
         if msg is None:
