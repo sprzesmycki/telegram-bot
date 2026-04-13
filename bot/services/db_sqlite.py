@@ -72,6 +72,25 @@ async def _apply_migrations(db: aiosqlite.Connection) -> None:
             await db.execute(f"ALTER TABLE goals ADD COLUMN {col} {col_type}")
             logger.info("Migration: added goals.%s", col)
 
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS liquids (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id INTEGER NOT NULL REFERENCES profiles(id),
+            owner_user_id BIGINT NOT NULL,
+            drunk_at DATETIME NOT NULL,
+            logged_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            description TEXT NOT NULL,
+            amount_ml INTEGER NOT NULL,
+            calories INTEGER DEFAULT 0,
+            protein_g REAL DEFAULT 0,
+            carbs_g REAL DEFAULT 0,
+            fat_g REAL DEFAULT 0,
+            raw_llm_response TEXT
+        )
+        """
+    )
+
 
 def get_db() -> aiosqlite.Connection:
     if _db is None:
@@ -259,6 +278,88 @@ async def get_meals_today(profile_id: int, owner_id: int) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+# ---------------------------------------------------------------------------
+# Liquid helpers
+# ---------------------------------------------------------------------------
+
+async def log_liquid(
+    profile_id: int,
+    owner_id: int,
+    drunk_at: datetime,
+    description: str,
+    amount_ml: int,
+    calories: int,
+    protein_g: float,
+    carbs_g: float,
+    fat_g: float,
+    raw_llm: str,
+) -> int:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        INSERT INTO liquids
+            (profile_id, owner_user_id, drunk_at, description,
+             amount_ml, calories, protein_g, carbs_g, fat_g, raw_llm_response)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (profile_id, owner_id, drunk_at.isoformat(), description,
+         amount_ml, calories, protein_g, carbs_g, fat_g, raw_llm),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+async def get_liquids_today(profile_id: int, owner_id: int) -> list[dict]:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        SELECT * FROM liquids
+        WHERE date(drunk_at) = date('now', 'localtime')
+          AND profile_id = ?
+          AND owner_user_id = ?
+        ORDER BY drunk_at
+        """,
+        (profile_id, owner_id),
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def get_liquids_range(
+    profile_id: int, owner_id: int, start: str, end: str
+) -> list[dict]:
+    db = get_db()
+    cursor = await db.execute(
+        """
+        SELECT * FROM liquids
+        WHERE drunk_at BETWEEN ? AND ?
+          AND profile_id = ?
+          AND owner_user_id = ?
+        ORDER BY drunk_at
+        """,
+        (start, end, profile_id, owner_id),
+    )
+    rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def get_daily_hydration(profile_id: int, owner_id: int) -> int:
+    """Return total ml drunk today."""
+    db = get_db()
+    cursor = await db.execute(
+        """
+        SELECT COALESCE(SUM(amount_ml), 0)
+        FROM liquids
+        WHERE date(drunk_at) = date('now', 'localtime')
+          AND profile_id = ?
+          AND owner_user_id = ?
+        """,
+        (profile_id, owner_id),
+    )
+    row = await cursor.fetchone()
+    return row[0] if row else 0
+
+
 async def get_meals_range(
     profile_id: int, owner_id: int, start: str, end: str
 ) -> list[dict]:
@@ -281,17 +382,36 @@ async def get_daily_totals(profile_id: int, owner_id: int) -> dict:
     db = get_db()
     cursor = await db.execute(
         """
+        WITH daily_meals AS (
+            SELECT
+                COALESCE(SUM(calories), 0)   AS calories,
+                COALESCE(SUM(protein_g), 0)  AS protein_g,
+                COALESCE(SUM(carbs_g), 0)    AS carbs_g,
+                COALESCE(SUM(fat_g), 0)      AS fat_g
+            FROM meals
+            WHERE date(eaten_at) = date('now', 'localtime')
+              AND profile_id = ?
+              AND owner_user_id = ?
+        ),
+        daily_liquids AS (
+            SELECT
+                COALESCE(SUM(calories), 0)   AS calories,
+                COALESCE(SUM(protein_g), 0)  AS protein_g,
+                COALESCE(SUM(carbs_g), 0)    AS carbs_g,
+                COALESCE(SUM(fat_g), 0)      AS fat_g
+            FROM liquids
+            WHERE date(drunk_at) = date('now', 'localtime')
+              AND profile_id = ?
+              AND owner_user_id = ?
+        )
         SELECT
-            COALESCE(SUM(calories), 0)   AS calories,
-            COALESCE(SUM(protein_g), 0)  AS protein_g,
-            COALESCE(SUM(carbs_g), 0)    AS carbs_g,
-            COALESCE(SUM(fat_g), 0)      AS fat_g
-        FROM meals
-        WHERE date(eaten_at) = date('now', 'localtime')
-          AND profile_id = ?
-          AND owner_user_id = ?
+            m.calories + l.calories AS calories,
+            m.protein_g + l.protein_g AS protein_g,
+            m.carbs_g + l.carbs_g AS carbs_g,
+            m.fat_g + l.fat_g AS fat_g
+        FROM daily_meals m, daily_liquids l
         """,
-        (profile_id, owner_id),
+        (profile_id, owner_id, profile_id, owner_id),
     )
     row = await cursor.fetchone()
     return dict(row)

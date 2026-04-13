@@ -12,7 +12,15 @@ load_dotenv(Path.home() / ".config" / "telegrambot" / ".env")
 from telegram import BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-from bot.handlers import calories, goals, model, profiles, summary, supplements
+from bot.handlers import (
+    calories,
+    goals,
+    liquids,
+    model,
+    profiles,
+    summary,
+    supplements,
+)
 from bot.services import db_postgres, db_sqlite
 from bot.services.llm import init_llm
 from bot.services.scheduler import (
@@ -68,6 +76,7 @@ async def post_init(app: Application) -> None:
     # Set bot commands for the hamburger menu
     commands = [
         BotCommand("cal", "Log a meal (photo or text)"),
+        BotCommand("liquid", "Log a drink (amount and type)"),
         BotCommand("recipe", "Log a recipe from URL or text"),
         BotCommand("yes", "Confirm and log the pending preview"),
         BotCommand("summary", "Show today's meal summary"),
@@ -124,6 +133,7 @@ def main() -> None:
     profiles.register(app)
     goals.register(app)
     calories.register(app)
+    liquids.register(app)
     summary.register(app)
     supplements.register(app)
     model.register(app)

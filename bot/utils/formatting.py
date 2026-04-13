@@ -56,6 +56,28 @@ def format_recipe_preview(
     )
 
 
+def format_liquid_preview(
+    description: str,
+    amount_ml: int,
+    cals: int,
+    protein: float,
+    carbs: float,
+    fat: float,
+    profile_names: list[str],
+    drunk_at: datetime,
+) -> str:
+    """Pre-log preview for a drink."""
+    target = ", ".join(profile_names) if profile_names else "(no profile)"
+    time_str = drunk_at.strftime("%H:%M")
+    return (
+        f"Preview — will log drink to: {target} at {time_str}\n"
+        f"{description} ({amount_ml}ml)\n"
+        f"{cals} kcal | P: {protein:g}g | C: {carbs:g}g | F: {fat:g}g\n"
+        "\n"
+        "Reply /yes to log, or send a remark to refine."
+    )
+
+
 def _format_macro_progress(label: str, current: float, goal: float | None) -> str:
     if goal is None or goal <= 0:
         return f"{label}: {current:g}g"
@@ -86,7 +108,40 @@ def format_meal_logged(
 
     return (
         f"[{profile_name}] Logged: {description}\n"
+        f"{cals} kcal | P: {protein:g}g | C: {carbs_g:g}g | F: {fat:g}g\n"
+        f"Daily: {total_cals} / {goal_cals} kcal {remaining_part}\n"
+        f"{protein_line} | {carbs_line} | {fat_line}"
+    )
+
+
+def format_liquid_logged(
+    profile_name: str,
+    description: str,
+    amount_ml: int,
+    cals: int,
+    protein: float,
+    carbs: float,
+    fat: float,
+    daily_total: dict,
+    goal: dict,
+    hydration_ml: int,
+) -> str:
+    total_cals = daily_total["calories"]
+    goal_cals = goal["daily_calories"]
+    diff = total_cals - goal_cals
+    if diff > 0:
+        remaining_part = f"({diff} over goal)"
+    else:
+        remaining_part = f"({goal_cals - total_cals} remaining)"
+
+    protein_line = _format_macro_progress("P", daily_total["protein_g"], goal.get("daily_protein_g"))
+    carbs_line = _format_macro_progress("C", daily_total["carbs_g"], goal.get("daily_carbs_g"))
+    fat_line = _format_macro_progress("F", daily_total["fat_g"], goal.get("daily_fat_g"))
+
+    return (
+        f"[{profile_name}] Logged Drink: {description} ({amount_ml}ml)\n"
         f"{cals} kcal | P: {protein:g}g | C: {carbs:g}g | F: {fat:g}g\n"
+        f"Daily Hydration: {hydration_ml} ml\n"
         f"Daily: {total_cals} / {goal_cals} kcal {remaining_part}\n"
         f"{protein_line} | {carbs_line} | {fat_line}"
     )
@@ -121,15 +176,28 @@ def _format_eaten_at(eaten_at: str | datetime) -> str:
 def format_summary(
     profile_name: str,
     meals: list[dict],
+    liquids: list[dict],
     total: dict,
     goal: dict,
+    hydration_ml: int,
 ) -> str:
     lines: list[str] = [f"Daily Summary for {profile_name}", ""]
 
-    for meal in meals:
-        t = _format_eaten_at(meal["eaten_at"])
-        lines.append(f"{t} - {meal['description']} \u2014 {meal['calories']} kcal")
+    if meals:
+        lines.append("--- Food ---")
+        for meal in meals:
+            t = _format_eaten_at(meal["eaten_at"])
+            lines.append(f"{t} - {meal['description']} \u2014 {meal['calories']} kcal")
+        lines.append("")
 
+    if liquids:
+        lines.append("--- Drinks ---")
+        for liquid in liquids:
+            t = _format_eaten_at(liquid["drunk_at"])
+            lines.append(f"{t} - {liquid['description']} ({liquid['amount_ml']}ml) \u2014 {liquid['calories']} kcal")
+        lines.append("")
+
+    lines.append(f"Hydration: {hydration_ml} ml")
     lines.append("")
     goal_cals = goal["daily_calories"]
     lines.append(f"Calories: {total['calories']} / {goal_cals} kcal")
@@ -177,7 +245,9 @@ def format_report(
     profile_name: str,
     date: str,
     meals: list[dict],
+    liquids: list[dict],
     total: dict,
+    hydration_ml: int,
     supplements_scheduled: list[dict],
     supplements_taken: list[dict],
 ) -> str:
@@ -204,7 +274,21 @@ def format_report(
         )
         lines.append("")
 
+    if liquids:
+        lines.append("--- Drinks ---")
+        for liquid in liquids:
+            t = _format_eaten_at(liquid["drunk_at"])
+            lines.append(f"{t}  {liquid['description']} ({liquid['amount_ml']}ml)")
+            lines.append(
+                f"       Calories: {liquid['calories']} | "
+                f"Protein: {liquid.get('protein_g', 0):g}g | "
+                f"Carbs: {liquid.get('carbs_g', 0):g}g | "
+                f"Fat: {liquid.get('fat_g', 0):g}g"
+            )
+            lines.append("")
+
     lines.append("--- Daily Totals ---")
+    lines.append(f"Hydration: {hydration_ml} ml")
     lines.append(f"Calories: {total['calories']}")
     lines.append(
         f"Protein: {total['protein_g']:g}g | "
@@ -262,6 +346,9 @@ def format_help() -> str:
         "/cal <description> [@name] [at HH:MM]\n"
         "  Analyse a meal and show a preview. Send a remark to refine, or\n"
         "  /yes to log. Send a photo with optional caption for vision mode.\n"
+        "\n"
+        "/liquid <description and amount> [@name] [at HH:MM]\n"
+        "  Log a drink (e.g. 500ml water or 250ml coffee). Same flow as /cal.\n"
         "\n"
         "/recipe <description> [for N]\n"
         "  Analyse a recipe and show a preview. Same refine/confirm flow.\n"

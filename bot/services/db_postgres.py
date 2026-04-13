@@ -113,6 +113,21 @@ CREATE TABLE IF NOT EXISTS piano_streak (
     longest_streak       INTEGER NOT NULL DEFAULT 0,
     last_practiced_date  DATE
 );
+
+CREATE TABLE IF NOT EXISTS liquids (
+    id              SERIAL PRIMARY KEY,
+    profile_id      INTEGER,
+    owner_user_id   BIGINT,
+    drunk_at        TIMESTAMPTZ,
+    logged_at       TIMESTAMPTZ DEFAULT NOW(),
+    description     TEXT,
+    amount_ml       INTEGER,
+    calories        INTEGER,
+    protein_g       REAL,
+    carbs_g         REAL,
+    fat_g           REAL,
+    raw_llm_response TEXT
+);
 """
 
 
@@ -264,6 +279,45 @@ async def mirror_log_meal(
             )
     except Exception:
         logger.error("pg mirror_log_meal failed", exc_info=True)
+
+
+async def mirror_log_liquid(
+    liquid_id: int,
+    profile_id: int,
+    owner_id: int,
+    drunk_at,
+    description: str,
+    amount_ml: int,
+    calories: int,
+    protein_g: float,
+    carbs_g: float,
+    fat_g: float,
+    raw_llm: str,
+) -> None:
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO liquids "
+                "(id, profile_id, owner_user_id, drunk_at, description, "
+                "amount_ml, calories, protein_g, carbs_g, fat_g, raw_llm_response) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+                "ON CONFLICT DO NOTHING",
+                liquid_id,
+                profile_id,
+                owner_id,
+                drunk_at,
+                description,
+                amount_ml,
+                calories,
+                protein_g,
+                carbs_g,
+                fat_g,
+                raw_llm,
+            )
+    except Exception:
+        logger.error("pg mirror_log_liquid failed", exc_info=True)
 
 
 async def mirror_set_goal(
