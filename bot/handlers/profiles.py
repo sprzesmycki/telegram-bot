@@ -7,6 +7,7 @@ from telegram.ext import CommandHandler, ContextTypes
 
 from bot.services import db_sqlite, db_postgres
 from bot.utils.formatting import format_profile_list, parse_target
+from bot.utils.nutrition import calculate_bmr, calculate_tdee, calculate_macros
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,15 @@ USAGE = (
     "/profile add <name>\n"
     "/profile list\n"
     "/profile switch <name>\n"
-    "/profile delete <name>"
+    "/profile delete <name>\n"
+    "/profile set <height|weight|age|gender|activity> <value> [@name]\n"
+    "\n"
+    "Use /stats [@name] to see requirements."
+)
+
+SET_USAGE = (
+    "Usage: /profile set <field> <value> [@name]\n"
+    "Fields: height, weight, age, gender (male/female), activity (sedentary/light/moderate/active/very_active)"
 )
 
 
@@ -92,8 +101,121 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else:
             await update.message.reply_text(f"Profile '{name}' not found.")
 
+    elif sub == "set" and len(args) >= 3:
+        field = args[1].lower()
+        value = args[2]
+        text = " ".join(args[2:]) # For @name parsing
+
+        targets = await get_target_profiles(owner_id, text)
+        if not targets:
+            await update.message.reply_text("Profile not found.")
+            return
+
+        kwargs = {}
+        try:
+            if field in ("height", "height_cm"):
+                kwargs["height_cm"] = float(value)
+            elif field in ("weight", "weight_kg"):
+                kwargs["weight_kg"] = float(value)
+            elif field in ("age",):
+                kwargs["age"] = int(value)
+            elif field in ("gender",):
+                val = value.lower()
+                if val not in ("male", "female"):
+                    raise ValueError("Gender must be 'male' or 'female'")
+                kwargs["gender"] = val
+            elif field in ("activity", "activity_level"):
+                val = value.lower()
+                valid = ("sedentary", "light", "moderate", "active", "very_active")
+                if val not in valid:
+                    raise ValueError(f"Activity must be one of: {', '.join(valid)}")
+                kwargs["activity_level"] = val
+            else:
+                await update.message.reply_text(SET_USAGE)
+                return
+        except ValueError as e:
+            await update.message.reply_text(f"Invalid value: {e}")
+            return
+
+        for p in targets:
+            await db_sqlite.update_profile(p["id"], owner_id, **kwargs)
+            await db_postgres.mirror_update_profile(p["id"], owner_id, **kwargs)
+
+        names = ", ".join(p["name"] for p in targets)
+        await update.message.reply_text(f"Updated {field} for: {names}")
+
     else:
         await update.message.reply_text(USAGE)
+
+
+# ---------------------------------------------------------------------------
+# /stats command
+# ---------------------------------------------------------------------------
+
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    owner_id = update.effective_user.id
+    text = " ".join(context.args) if context.args else ""
+    
+    targets = await get_target_profiles(owner_id, text)
+    if not targets:
+        await update.message.reply_text("Profile not found.")
+        return
+
+    for p in targets:
+        name = p["name"]
+        h = p.get("height_cm")
+        w = p.get("weight_kg")
+        age = p.get("age")
+        gender = p.get("gender")
+        activity = p.get("activity_level")
+
+        if not all([h, w, age, gender, activity]):
+            missing = []
+            if not h: missing.append("height")
+            if not w: missing.append("weight")
+            if not age: missing.append("age")
+            if not gender: missing.append("gender")
+            if not activity: missing.append("activity")
+            
+            await update.message.reply_text(
+                f"Profile '{name}' is missing: {', '.join(missing)}.\n"
+                f"Set them using `/profile set <field> <value> @{name}`"
+            )
+            continue
+
+        bmr = calculate_bmr(w, h, age, gender)
+        tdee = calculate_tdee(bmr, activity)
+        macros = calculate_macros(tdee, w)
+
+        # Automatically save these as goals
+        await db_sqlite.set_goal(
+            p["id"], 
+            int(tdee), 
+            protein_g=round(macros["protein_g"], 1),
+            carbs_g=round(macros["carbs_g"], 1),
+            fat_g=round(macros["fat_g"], 1)
+        )
+        await db_postgres.mirror_set_goal(
+            p["id"], 
+            int(tdee), 
+            protein_g=round(macros["protein_g"], 1),
+            carbs_g=round(macros["carbs_g"], 1),
+            fat_g=round(macros["fat_g"], 1)
+        )
+
+        resp = (
+            f"📊 *Stats for {name}*\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"BMR: {int(bmr)} kcal\n"
+            f"TDEE: {int(tdee)} kcal (Maintenance)\n\n"
+            f"*Daily Targets (Saved):*\n"
+            f"Calories: {int(tdee)} kcal\n"
+            f"Protein: {int(macros['protein_g'])}g\n"
+            f"Carbs: {int(macros['carbs_g'])}g\n"
+            f"Fat: {int(macros['fat_g'])}g"
+        )
+        await update.message.reply_text(resp, parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------------------
@@ -128,3 +250,4 @@ async def get_target_profiles(owner_id: int, text: str) -> list[dict]:
 
 def register(app) -> None:
     app.add_handler(CommandHandler("profile", profile_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))

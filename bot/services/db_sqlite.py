@@ -46,6 +46,32 @@ async def _apply_migrations(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE supplements ADD COLUMN dose TEXT")
         logger.info("Migration: added supplements.dose")
 
+    cursor = await db.execute("PRAGMA table_info(profiles)")
+    prof_columns = {row["name"] for row in await cursor.fetchall()}
+    new_prof_cols = {
+        "height_cm": "REAL",
+        "weight_kg": "REAL",
+        "age": "INTEGER",
+        "gender": "TEXT",
+        "activity_level": "TEXT",
+    }
+    for col, col_type in new_prof_cols.items():
+        if col not in prof_columns:
+            await db.execute(f"ALTER TABLE profiles ADD COLUMN {col} {col_type}")
+            logger.info("Migration: added profiles.%s", col)
+
+    cursor = await db.execute("PRAGMA table_info(goals)")
+    goal_columns = {row["name"] for row in await cursor.fetchall()}
+    new_goal_cols = {
+        "daily_protein_g": "REAL",
+        "daily_carbs_g": "REAL",
+        "daily_fat_g": "REAL",
+    }
+    for col, col_type in new_goal_cols.items():
+        if col not in goal_columns:
+            await db.execute(f"ALTER TABLE goals ADD COLUMN {col} {col_type}")
+            logger.info("Migration: added goals.%s", col)
+
 
 def get_db() -> aiosqlite.Connection:
     if _db is None:
@@ -73,6 +99,44 @@ async def create_profile(owner_id: int, name: str) -> int:
     )
     await db.commit()
     return cursor.lastrowid
+
+
+async def update_profile(
+    profile_id: int,
+    owner_id: int,
+    height_cm: float | None = None,
+    weight_kg: float | None = None,
+    age: int | None = None,
+    gender: str | None = None,
+    activity_level: str | None = None,
+) -> None:
+    db = get_db()
+    updates = []
+    params = []
+
+    if height_cm is not None:
+        updates.append("height_cm = ?")
+        params.append(height_cm)
+    if weight_kg is not None:
+        updates.append("weight_kg = ?")
+        params.append(weight_kg)
+    if age is not None:
+        updates.append("age = ?")
+        params.append(age)
+    if gender is not None:
+        updates.append("gender = ?")
+        params.append(gender)
+    if activity_level is not None:
+        updates.append("activity_level = ?")
+        params.append(activity_level)
+
+    if not updates:
+        return
+
+    params.extend([profile_id, owner_id])
+    sql = f"UPDATE profiles SET {', '.join(updates)} WHERE id = ? AND owner_user_id = ?"
+    await db.execute(sql, tuple(params))
+    await db.commit()
 
 
 async def list_profiles(owner_id: int) -> list[dict]:
@@ -237,23 +301,44 @@ async def get_daily_totals(profile_id: int, owner_id: int) -> dict:
 # Goal helpers
 # ---------------------------------------------------------------------------
 
-async def set_goal(profile_id: int, daily_calories: int) -> None:
+async def set_goal(
+    profile_id: int,
+    daily_calories: int,
+    protein_g: float | None = None,
+    carbs_g: float | None = None,
+    fat_g: float | None = None,
+) -> None:
     db = get_db()
     await db.execute(
-        "INSERT OR REPLACE INTO goals (profile_id, daily_calories) VALUES (?, ?)",
-        (profile_id, daily_calories),
+        """
+        INSERT INTO goals (profile_id, daily_calories, daily_protein_g, daily_carbs_g, daily_fat_g)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(profile_id) DO UPDATE SET
+            daily_calories = excluded.daily_calories,
+            daily_protein_g = excluded.daily_protein_g,
+            daily_carbs_g = excluded.daily_carbs_g,
+            daily_fat_g = excluded.daily_fat_g
+        """,
+        (profile_id, daily_calories, protein_g, carbs_g, fat_g),
     )
     await db.commit()
 
 
-async def get_goal(profile_id: int) -> int:
+async def get_goal(profile_id: int) -> dict:
     db = get_db()
     cursor = await db.execute(
-        "SELECT daily_calories FROM goals WHERE profile_id = ?",
+        "SELECT * FROM goals WHERE profile_id = ?",
         (profile_id,),
     )
     row = await cursor.fetchone()
-    return row["daily_calories"] if row else 2000
+    if row:
+        return dict(row)
+    return {
+        "daily_calories": 2000,
+        "daily_protein_g": None,
+        "daily_carbs_g": None,
+        "daily_fat_g": None,
+    }
 
 
 # ---------------------------------------------------------------------------

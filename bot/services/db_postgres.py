@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS profiles (
     owner_user_id BIGINT NOT NULL,
     name        TEXT NOT NULL,
     active      BOOLEAN NOT NULL DEFAULT TRUE,
+    height_cm   REAL,
+    weight_kg   REAL,
+    age         INTEGER,
+    gender      TEXT,
+    activity_level TEXT,
     UNIQUE (owner_user_id, name)
 );
 
@@ -47,7 +52,10 @@ CREATE TABLE IF NOT EXISTS meals (
 
 CREATE TABLE IF NOT EXISTS goals (
     profile_id      INTEGER PRIMARY KEY REFERENCES profiles(id),
-    daily_calories  INTEGER DEFAULT 2000
+    daily_calories  INTEGER DEFAULT 2000,
+    daily_protein_g REAL,
+    daily_carbs_g   REAL,
+    daily_fat_g     REAL
 );
 
 CREATE TABLE IF NOT EXISTS supplements (
@@ -65,6 +73,45 @@ CREATE TABLE IF NOT EXISTS supplement_logs (
     supplement_id   INTEGER,
     profile_id      INTEGER,
     taken_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS piano_sessions (
+    id                SERIAL PRIMARY KEY,
+    owner_user_id     BIGINT NOT NULL,
+    practiced_at      DATE NOT NULL,
+    duration_minutes  INTEGER,
+    notes             TEXT,
+    pieces_practiced  TEXT,
+    logged_at         TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS piano_pieces (
+    id                 SERIAL PRIMARY KEY,
+    owner_user_id      BIGINT NOT NULL,
+    title              TEXT NOT NULL,
+    composer           TEXT,
+    status             TEXT NOT NULL DEFAULT 'learning',
+    added_at           DATE DEFAULT CURRENT_DATE,
+    last_practiced_at  DATE,
+    notes              TEXT
+);
+
+CREATE TABLE IF NOT EXISTS piano_recordings (
+    id                SERIAL PRIMARY KEY,
+    owner_user_id     BIGINT NOT NULL,
+    piece_id          INTEGER REFERENCES piano_pieces(id),
+    recorded_at       TIMESTAMPTZ DEFAULT NOW(),
+    file_path         TEXT,
+    duration_seconds  INTEGER,
+    feedback_summary  TEXT,
+    raw_analysis      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS piano_streak (
+    owner_user_id        BIGINT PRIMARY KEY,
+    current_streak       INTEGER NOT NULL DEFAULT 0,
+    longest_streak       INTEGER NOT NULL DEFAULT 0,
+    last_practiced_date  DATE
 );
 """
 
@@ -99,6 +146,16 @@ async def init_pg() -> None:
             await conn.execute(
                 "ALTER TABLE supplements ADD COLUMN IF NOT EXISTS dose TEXT"
             )
+            # Profile columns migrations
+            await conn.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS height_cm REAL")
+            await conn.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS weight_kg REAL")
+            await conn.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS age INTEGER")
+            await conn.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS gender TEXT")
+            await conn.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS activity_level TEXT")
+            # Goal columns migrations
+            await conn.execute("ALTER TABLE goals ADD COLUMN IF NOT EXISTS daily_protein_g REAL")
+            await conn.execute("ALTER TABLE goals ADD COLUMN IF NOT EXISTS daily_carbs_g REAL")
+            await conn.execute("ALTER TABLE goals ADD COLUMN IF NOT EXISTS daily_fat_g REAL")
         logger.info("PostgreSQL mirror initialised")
     except (ConnectionRefusedError, asyncpg.PostgresError, OSError, Exception) as exc:
         logger.warning("PostgreSQL mirror unavailable: %s", exc)
@@ -209,17 +266,27 @@ async def mirror_log_meal(
         logger.error("pg mirror_log_meal failed", exc_info=True)
 
 
-async def mirror_set_goal(profile_id: int, daily_calories: int) -> None:
+async def mirror_set_goal(
+    profile_id: int,
+    daily_calories: int,
+    protein_g: float | None = None,
+    carbs_g: float | None = None,
+    fat_g: float | None = None,
+) -> None:
     if _pool is None:
         return
     try:
         async with _pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO goals (profile_id, daily_calories) "
-                "VALUES ($1, $2) "
-                "ON CONFLICT (profile_id) DO UPDATE SET daily_calories = $2",
+                "INSERT INTO goals (profile_id, daily_calories, daily_protein_g, daily_carbs_g, daily_fat_g) "
+                "VALUES ($1, $2, $3, $4, $5) "
+                "ON CONFLICT (profile_id) DO UPDATE SET "
+                "daily_calories = $2, daily_protein_g = $3, daily_carbs_g = $4, daily_fat_g = $5",
                 profile_id,
                 daily_calories,
+                protein_g,
+                carbs_g,
+                fat_g,
             )
     except Exception:
         logger.error("pg mirror_set_goal failed", exc_info=True)
@@ -288,3 +355,49 @@ async def mirror_log_supplement_taken(
             )
     except Exception:
         logger.error("pg mirror_log_supplement_taken failed", exc_info=True)
+
+async def mirror_update_profile(
+    profile_id: int,
+    owner_id: int,
+    height_cm: float | None = None,
+    weight_kg: float | None = None,
+    age: int | None = None,
+    gender: str | None = None,
+    activity_level: str | None = None,
+) -> None:
+    if _pool is None:
+        return
+    try:
+        updates = []
+        params = []
+        i = 1
+        if height_cm is not None:
+            updates.append(f"height_cm = ${i}")
+            params.append(height_cm)
+            i += 1
+        if weight_kg is not None:
+            updates.append(f"weight_kg = ${i}")
+            params.append(weight_kg)
+            i += 1
+        if age is not None:
+            updates.append(f"age = ${i}")
+            params.append(age)
+            i += 1
+        if gender is not None:
+            updates.append(f"gender = ${i}")
+            params.append(gender)
+            i += 1
+        if activity_level is not None:
+            updates.append(f"activity_level = ${i}")
+            params.append(activity_level)
+            i += 1
+
+        if not updates:
+            return
+
+        params.extend([profile_id, owner_id])
+        sql = f"UPDATE profiles SET {', '.join(updates)} WHERE id = ${i} AND owner_user_id = ${i+1}"
+        async with _pool.acquire() as conn:
+            await conn.execute(sql, *params)
+    except Exception:
+        logger.error("pg mirror_update_profile failed", exc_info=True)

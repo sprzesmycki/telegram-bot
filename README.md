@@ -46,8 +46,9 @@ A Telegram bot that tracks daily calorie intake (via photo or text) and manages 
 | `/summary [@name]` | Today's meal summary |
 | `/week [@name]` | Last 7 days overview |
 | `/report [@name] [YYYY-MM-DD]` | Dietitian-ready daily report |
-| `/goal <kcal> [@name]` | Set daily calorie target |
-| `/profile add\|list\|switch\|delete <name>` | Manage profiles |
+| `/goal <kcal> [@name]` | Set daily calorie target (resets macros) |
+| `/stats [@name]` | Calculate BMR, TDEE and macro goals from profile data |
+| `/profile add\|list\|switch\|delete\|set <name>` | Manage profiles and attributes (height, weight, etc.) |
 | `/supplement add\|list\|done\|remove <name> [HH:MM]` | Manage supplements |
 | `/model [openrouter\|local\|custom] [model-name]` | View or switch LLM provider |
 
@@ -55,7 +56,7 @@ A Telegram bot that tracks daily calorie intake (via photo or text) and manages 
 
 A realistic end-to-end flow. Run these in order against your bot in Telegram:
 
-**1. Create profiles**
+**1. Create and configure profiles**
 
 ```
 /profile add Seba
@@ -63,6 +64,20 @@ A realistic end-to-end flow. Run these in order against your bot in Telegram:
 /profile list
 /profile switch Wife
 ```
+
+Set up physical attributes to auto-calculate nutritional needs:
+
+```
+/profile set height 180 @Seba
+/profile set weight 85 @Seba
+/profile set age 30 @Seba
+/profile set gender male @Seba
+/profile set activity moderate @Seba
+
+/stats @Seba
+```
+
+The `/stats` command uses the Mifflin-St Jeor equation to calculate BMR and TDEE, then sets daily targets: 2.0g/kg protein, 1.0g/kg fat, and remaining calories from carbs.
 
 The first `/profile add` auto-creates a default `Me` profile alongside yours, so after `add Seba` you'll have both `Me` and `Seba`. Names are case-sensitive — `@wife` won't match `Wife`.
 
@@ -72,6 +87,8 @@ The first `/profile add` auto-creates a default `Me` profile alongside yours, so
 /goal 2200
 /goal 1800 @Wife
 ```
+
+Setting a manual `/goal` resets macro targets to "untracked" mode (calories only).
 
 **3. Log meals (preview → approve or refine)**
 
@@ -88,22 +105,26 @@ Every `/cal` (text or photo) replies with a **preview**, not a log — nothing i
 
 ```
 Preview — will log to: Me at 13:05
-Scrambled eggs with toast / Jajecznica z tostem
+Scrambled eggs with toast
+Jajecznica z tostem
 420 kcal | P: 22g | C: 35g | F: 18g
 
 Reply /yes to log, or send a remark to refine.
 Example: "actually larger portion" or "add a tablespoon of butter".
 ```
 
-Descriptions are always bilingual (English / Polish). To approve, reply `/yes`. To adjust, send a plain-text remark and the bot re-analyses:
+Descriptions are always bilingual (English / Polish) in separate lines. To approve, reply `/yes`. To adjust, send a plain-text remark and the bot re-analyses:
 
 ```
 you: /cal scrambled eggs
-bot: Preview — ... Scrambled eggs / Jajecznica ... 180 kcal ...
+bot: Preview — ... Scrambled eggs ... 180 kcal ...
 you: that's 3 eggs with butter and a slice of cheddar
-bot: Preview — ... Scrambled eggs with butter and cheddar / ... 350 kcal ...
+bot: Preview — ... Scrambled eggs with butter and cheddar ... 350 kcal ...
 you: /yes
-bot: [Me] Logged: Scrambled eggs with butter and cheddar / Jajecznica z masłem i cheddarem ...
+bot: [Me] Logged: Scrambled eggs with butter and cheddar
+Jajecznica z masłem i cheddarem ...
+Daily: 350 / 2200 kcal (1850 remaining)
+P: 25 / 170g | C: 5 / 230g | F: 25 / 85g
 ```
 
 Caption examples for photos:

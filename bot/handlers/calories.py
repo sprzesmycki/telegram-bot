@@ -98,7 +98,7 @@ async def _log_and_reply(
                 protein=protein_g,
                 carbs=carbs_g,
                 fat=fat_g,
-                daily_total=totals["calories"],
+                daily_total=totals,
                 goal=goal,
             )
         )

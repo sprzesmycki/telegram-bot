@@ -47,10 +47,10 @@ async def goal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         profile = await db_sqlite.ensure_default_profile(owner_id)
 
-    await db_sqlite.set_goal(profile["id"], kcal)
-    await db_postgres.mirror_set_goal(profile["id"], kcal)
+    await db_sqlite.set_goal(profile["id"], kcal, protein_g=None, carbs_g=None, fat_g=None)
+    await db_postgres.mirror_set_goal(profile["id"], kcal, protein_g=None, carbs_g=None, fat_g=None)
     await update.message.reply_text(
-        f"Goal set to {kcal} kcal/day for {profile['name']}"
+        f"Goal set to {kcal} kcal/day for {profile['name']} (macros reset)"
     )
 
 
