@@ -56,6 +56,12 @@ def format_recipe_preview(
     )
 
 
+def _format_macro_progress(label: str, current: float, goal: float | None) -> str:
+    if goal is None or goal <= 0:
+        return f"{label}: {current:g}g"
+    return f"{label}: {current:g} / {goal:g}g"
+
+
 def format_meal_logged(
     profile_name: str,
     description: str,
@@ -63,19 +69,26 @@ def format_meal_logged(
     protein: float,
     carbs: float,
     fat: float,
-    daily_total: int,
-    goal: int,
+    daily_total: dict,
+    goal: dict,
 ) -> str:
-    diff = daily_total - goal
+    total_cals = daily_total["calories"]
+    goal_cals = goal["daily_calories"]
+    diff = total_cals - goal_cals
     if diff > 0:
         remaining_part = f"({diff} over goal)"
     else:
-        remaining_part = f"({goal - daily_total} remaining)"
+        remaining_part = f"({goal_cals - total_cals} remaining)"
+
+    protein_line = _format_macro_progress("P", daily_total["protein_g"], goal.get("daily_protein_g"))
+    carbs_line = _format_macro_progress("C", daily_total["carbs_g"], goal.get("daily_carbs_g"))
+    fat_line = _format_macro_progress("F", daily_total["fat_g"], goal.get("daily_fat_g"))
 
     return (
         f"[{profile_name}] Logged: {description}\n"
-        f"Calories: {cals} kcal | P: {protein:g}g | C: {carbs:g}g | F: {fat:g}g\n"
-        f"Daily total: {daily_total} / {goal} kcal {remaining_part}"
+        f"{cals} kcal | P: {protein:g}g | C: {carbs:g}g | F: {fat:g}g\n"
+        f"Daily: {total_cals} / {goal_cals} kcal {remaining_part}\n"
+        f"{protein_line} | {carbs_line} | {fat_line}"
     )
 
 
@@ -109,7 +122,7 @@ def format_summary(
     profile_name: str,
     meals: list[dict],
     total: dict,
-    goal: int,
+    goal: dict,
 ) -> str:
     lines: list[str] = [f"Daily Summary for {profile_name}", ""]
 
@@ -118,29 +131,34 @@ def format_summary(
         lines.append(f"{t} - {meal['description']} \u2014 {meal['calories']} kcal")
 
     lines.append("")
-    lines.append(f"Totals: {total['calories']} / {goal} kcal")
-    lines.append(
-        f"Protein: {total['protein_g']:g}g | "
-        f"Carbs: {total['carbs_g']:g}g | "
-        f"Fat: {total['fat_g']:g}g"
-    )
+    goal_cals = goal["daily_calories"]
+    lines.append(f"Calories: {total['calories']} / {goal_cals} kcal")
+    
+    p_line = _format_macro_progress("Protein", total["protein_g"], goal.get("daily_protein_g"))
+    c_line = _format_macro_progress("Carbs", total["carbs_g"], goal.get("daily_carbs_g"))
+    f_line = _format_macro_progress("Fat", total["fat_g"], goal.get("daily_fat_g"))
+    
+    lines.append(p_line)
+    lines.append(c_line)
+    lines.append(f_line)
     return "\n".join(lines)
 
 
 def format_week(
     profile_name: str,
     daily_data: list[dict],
-    goal: int,
+    goal: dict,
 ) -> str:
     lines: list[str] = [f"Weekly Summary for {profile_name}", ""]
 
     total_cals = 0
     count = 0
+    goal_cals = goal["daily_calories"]
     for day in daily_data:
         cals = day["calories"]
         total_cals += cals
         count += 1
-        diff = cals - goal
+        diff = cals - goal_cals
         if diff > 0:
             note = f"({diff} over goal)"
         elif diff < 0:
@@ -151,7 +169,7 @@ def format_week(
 
     avg = round(total_cals / count) if count else 0
     lines.append("")
-    lines.append(f"Weekly average: {avg} kcal/day")
+    lines.append(f"Weekly average: {avg} kcal/day (Goal: {goal_cals})")
     return "\n".join(lines)
 
 
@@ -193,7 +211,18 @@ def format_report(
         f"Carbs: {total['carbs_g']:g}g | "
         f"Fat: {total['fat_g']:g}g"
     )
-    lines.append(f"Goal: {total.get('goal', '')} kcal" if "goal" in total else "")
+    
+    goal = total.get("goal")
+    if goal and isinstance(goal, dict):
+        lines.append(f"Goal: {goal['daily_calories']} kcal")
+        if goal.get("daily_protein_g"):
+            lines.append(
+                f"Goal Macros: P: {goal['daily_protein_g']:g}g | "
+                f"C: {goal['daily_carbs_g']:g}g | "
+                f"F: {goal['daily_fat_g']:g}g"
+            )
+    elif goal:
+        lines.append(f"Goal: {goal} kcal")
 
     lines.append("")
     lines.append("--- Supplements ---")

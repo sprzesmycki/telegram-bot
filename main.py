@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 # Load env before any other project imports
 load_dotenv(Path.home() / ".config" / "telegrambot" / ".env")
 
+from telegram import BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from bot.handlers import calories, goals, model, profiles, summary, supplements
@@ -63,6 +64,22 @@ async def post_init(app: Application) -> None:
     await db_sqlite.init_db()
     await db_postgres.init_pg()
     init_llm()
+
+    # Set bot commands for the hamburger menu
+    commands = [
+        BotCommand("cal", "Log a meal (photo or text)"),
+        BotCommand("recipe", "Log a recipe from URL or text"),
+        BotCommand("yes", "Confirm and log the pending preview"),
+        BotCommand("summary", "Show today's meal summary"),
+        BotCommand("week", "Last 7 days overview"),
+        BotCommand("report", "Daily report for dietitian"),
+        BotCommand("goal", "Set daily calorie target"),
+        BotCommand("profile", "Manage profiles (add/list/switch/delete/set)"),
+        BotCommand("stats", "Show BMR, TDEE and macro targets"),
+        BotCommand("supplement", "Manage supplements (add/list/done/remove)"),
+        BotCommand("model", "View or switch LLM provider/model"),
+    ]
+    await app.bot.set_my_commands(commands)
 
     scheduler = init_scheduler()
     app.bot_data["scheduler"] = scheduler

@@ -23,7 +23,7 @@ Use **two separate model tiers** — do not use the same model for everything:
 
 ### Tier 2 — Capable audio/reasoning model (recording analysis sub-agent)
 - Needs strong reasoning; audio transcription handled separately (see below)
-- Recommended: `anthropic/claude-3-5-sonnet` or `openai/gpt-4o` via OpenRouter
+- Recommended: `openai/gpt-4o` via OpenRouter
 - Configured via `PIANO_ANALYSIS_MODEL` in `.env`
 - Used only when user submits a recording — keep cost low by invoking rarely
 

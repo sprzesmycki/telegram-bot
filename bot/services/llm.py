@@ -126,7 +126,10 @@ _MEAL_SYSTEM = (
     "Both fields are mandatory — never omit either. "
     'Examples: {"description_en": "Scrambled eggs with toast", '
     '"description_pl": "Jajecznica z tostem"}. '
-    "Always estimate numeric values, never refuse."
+    "Always estimate numeric values, never refuse. "
+    "IMPORTANT: If a hand or finger is visible in the photo, use it as a "
+    "scale reference to estimate portion sizes more accurately (e.g., a "
+    "fist is roughly 250ml/1 cup, a palm is ~100g of meat)."
 )
 
 
@@ -140,11 +143,9 @@ def _combine_bilingual_description(result: dict) -> dict:
     en = (result.get("description_en") or "").strip()
     pl = (result.get("description_pl") or "").strip()
     if en and pl:
-        result["description"] = f"{en} / {pl}"
+        result["description"] = f"{en}\n{pl}"
     elif en or pl:
         result["description"] = en or pl
-    # If the model already returned "description" (old schema) and neither
-    # split field, leave result["description"] untouched.
     return result
 
 
@@ -257,7 +258,7 @@ def _combine_bilingual_dish_name(result: dict) -> dict:
     en = (result.get("dish_name_en") or "").strip()
     pl = (result.get("dish_name_pl") or "").strip()
     if en and pl:
-        result["dish_name"] = f"{en} / {pl}"
+        result["dish_name"] = f"{en}\n{pl}"
     elif en or pl:
         result["dish_name"] = en or pl
     return result
