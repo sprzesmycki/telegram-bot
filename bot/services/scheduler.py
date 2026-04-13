@@ -189,6 +189,60 @@ def register_daily_summary(scheduler: AsyncIOScheduler, bot) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Piano daily check-in
+# ---------------------------------------------------------------------------
+
+
+def register_piano_checkin(scheduler: AsyncIOScheduler, bot) -> None:
+    """Register the daily piano check-in job at PIANO_CHECKIN_TIME.
+
+    Iterates every known piano owner. Skips any owner whose session is
+    already logged today so users aren't nagged after they've practised.
+    """
+    time_str = os.getenv("PIANO_CHECKIN_TIME", "19:00")
+    parts = time_str.split(":")
+    hour, minute = int(parts[0]), int(parts[1])
+
+    async def _send_checkins() -> None:
+        from bot.services import db_sqlite
+
+        owner_ids = await db_sqlite.get_piano_owners()
+
+        db = db_sqlite.get_db()
+        cursor = await db.execute(
+            "SELECT DISTINCT owner_user_id FROM profiles WHERE active = 1"
+        )
+        rows = await cursor.fetchall()
+        for row in rows:
+            owner_ids.append(int(row[0] if isinstance(row, tuple) else row["owner_user_id"]))
+
+        for owner_id in set(owner_ids):
+            try:
+                session = await db_sqlite.get_piano_session_today(owner_id)
+                if session is not None:
+                    continue
+                await bot.send_message(
+                    chat_id=owner_id,
+                    text=(
+                        "\U0001f3b9 Time for your daily piano check-in! "
+                        "Use /piano log to record today's practice, or tell me about it."
+                    ),
+                )
+            except Exception:
+                logger.error(
+                    "Failed to send piano check-in for owner=%s", owner_id, exc_info=True
+                )
+
+    scheduler.add_job(
+        _send_checkins,
+        CronTrigger(hour=hour, minute=minute),
+        id="piano_checkin",
+        replace_existing=True,
+    )
+    logger.info("Piano check-in scheduled at %s", time_str)
+
+
+# ---------------------------------------------------------------------------
 # Bulk load on startup
 # ---------------------------------------------------------------------------
 

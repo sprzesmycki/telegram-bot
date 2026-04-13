@@ -320,6 +320,32 @@ async def mirror_log_liquid(
         logger.error("pg mirror_log_liquid failed", exc_info=True)
 
 
+async def mirror_delete_meal(meal_id: int, owner_id: int) -> None:
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM meals WHERE id = $1 AND owner_user_id = $2",
+                meal_id, owner_id,
+            )
+    except Exception:
+        logger.error("pg mirror_delete_meal failed", exc_info=True)
+
+
+async def mirror_delete_liquid(liquid_id: int, owner_id: int) -> None:
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM liquids WHERE id = $1 AND owner_user_id = $2",
+                liquid_id, owner_id,
+            )
+    except Exception:
+        logger.error("pg mirror_delete_liquid failed", exc_info=True)
+
+
 async def mirror_set_goal(
     profile_id: int,
     daily_calories: int,
@@ -455,3 +481,184 @@ async def mirror_update_profile(
             await conn.execute(sql, *params)
     except Exception:
         logger.error("pg mirror_update_profile failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Piano mirrors
+# ---------------------------------------------------------------------------
+
+
+async def mirror_log_piano_session(
+    session_id: int,
+    owner_id: int,
+    practiced_at,
+    duration_minutes: int | None,
+    notes: str | None,
+    pieces_practiced_json: str,
+) -> None:
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO piano_sessions "
+                "(id, owner_user_id, practiced_at, duration_minutes, notes, pieces_practiced) "
+                "VALUES ($1, $2, $3, $4, $5, $6) "
+                "ON CONFLICT DO NOTHING",
+                session_id,
+                owner_id,
+                practiced_at,
+                duration_minutes,
+                notes,
+                pieces_practiced_json,
+            )
+    except Exception:
+        logger.error("pg mirror_log_piano_session failed", exc_info=True)
+
+
+async def mirror_add_piano_piece(
+    piece_id: int,
+    owner_id: int,
+    title: str,
+    composer: str | None,
+) -> None:
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO piano_pieces "
+                "(id, owner_user_id, title, composer, status) "
+                "VALUES ($1, $2, $3, $4, 'learning') "
+                "ON CONFLICT DO NOTHING",
+                piece_id,
+                owner_id,
+                title,
+                composer,
+            )
+    except Exception:
+        logger.error("pg mirror_add_piano_piece failed", exc_info=True)
+
+
+async def mirror_remove_piano_piece(owner_id: int, piece_id: int) -> None:
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM piano_pieces WHERE id = $1 AND owner_user_id = $2",
+                piece_id,
+                owner_id,
+            )
+    except Exception:
+        logger.error("pg mirror_remove_piano_piece failed", exc_info=True)
+
+
+async def mirror_update_piano_piece_status(
+    owner_id: int, piece_id: int, status: str
+) -> None:
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE piano_pieces SET status = $1 "
+                "WHERE id = $2 AND owner_user_id = $3",
+                status,
+                piece_id,
+                owner_id,
+            )
+    except Exception:
+        logger.error("pg mirror_update_piano_piece_status failed", exc_info=True)
+
+
+async def mirror_update_piano_piece_note(
+    owner_id: int, piece_id: int, notes: str
+) -> None:
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE piano_pieces SET notes = $1 "
+                "WHERE id = $2 AND owner_user_id = $3",
+                notes,
+                piece_id,
+                owner_id,
+            )
+    except Exception:
+        logger.error("pg mirror_update_piano_piece_note failed", exc_info=True)
+
+
+async def mirror_touch_piano_piece_last_practiced(
+    owner_id: int, piece_id: int, practiced_at
+) -> None:
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE piano_pieces SET last_practiced_at = $1 "
+                "WHERE id = $2 AND owner_user_id = $3",
+                practiced_at,
+                piece_id,
+                owner_id,
+            )
+    except Exception:
+        logger.error("pg mirror_touch_piano_piece_last_practiced failed", exc_info=True)
+
+
+async def mirror_upsert_piano_streak(
+    owner_id: int,
+    current_streak: int,
+    longest_streak: int,
+    last_practiced_date,
+) -> None:
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO piano_streak "
+                "(owner_user_id, current_streak, longest_streak, last_practiced_date) "
+                "VALUES ($1, $2, $3, $4) "
+                "ON CONFLICT (owner_user_id) DO UPDATE SET "
+                "current_streak = $2, longest_streak = $3, last_practiced_date = $4",
+                owner_id,
+                current_streak,
+                longest_streak,
+                last_practiced_date,
+            )
+    except Exception:
+        logger.error("pg mirror_upsert_piano_streak failed", exc_info=True)
+
+
+async def mirror_add_piano_recording(
+    recording_id: int,
+    owner_id: int,
+    piece_id: int | None,
+    file_path: str | None,
+    duration_seconds: int | None,
+    feedback_summary: str | None,
+    raw_analysis: str | None,
+) -> None:
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO piano_recordings "
+                "(id, owner_user_id, piece_id, file_path, duration_seconds, "
+                "feedback_summary, raw_analysis) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7) "
+                "ON CONFLICT DO NOTHING",
+                recording_id,
+                owner_id,
+                piece_id,
+                file_path,
+                duration_seconds,
+                feedback_summary,
+                raw_analysis,
+            )
+    except Exception:
+        logger.error("pg mirror_add_piano_recording failed", exc_info=True)

@@ -1,6 +1,6 @@
-# Calorie & Supplement Tracker — Telegram Bot
+# Calorie, Supplement & Piano Practice Tracker — Telegram Bot
 
-A Telegram bot that tracks daily calorie intake (via photo or text) and manages supplement reminders with a custom schedule. Supports multiple profiles per account.
+A Telegram bot that tracks daily calorie intake (via photo or text), manages supplement reminders, and coaches piano practice (streaks, repertoire, voice-note analysis). Supports multiple profiles per account.
 
 ## Prerequisites
 
@@ -43,6 +43,7 @@ A Telegram bot that tracks daily calorie intake (via photo or text) and manages 
 | `/recipe <URL or text> [for N] [@name\|@both]` | Analyse a recipe; shows preview |
 | `/yes` | Confirm and log the pending meal/recipe |
 | _(plain text)_ | Refine the pending preview (e.g. "add butter", "larger portion") |
+| `/today [@name\|@both]` | List today's meals & drinks with inline ❌ delete buttons |
 | `/summary [@name]` | Today's meal summary |
 | `/week [@name]` | Last 7 days overview |
 | `/report [@name] [YYYY-MM-DD]` | Dietitian-ready daily report |
@@ -50,6 +51,13 @@ A Telegram bot that tracks daily calorie intake (via photo or text) and manages 
 | `/stats [@name]` | Calculate BMR, TDEE and macro goals from profile data |
 | `/profile add\|list\|switch\|delete\|set <name>` | Manage profiles and attributes (height, weight, etc.) |
 | `/supplement add\|list\|done\|remove <name> [HH:MM]` | Manage supplements |
+| `/piano` | Piano summary: streak, pieces in progress, last session |
+| `/piano log [N min] [pieces…]` | Log today's practice; updates streak |
+| `/piano checkin [note]` | LLM coaching check-in (cheap model) |
+| `/piano pieces` | List your repertoire grouped by status |
+| `/piano piece add\|status\|note\|remove <title>` | Manage pieces |
+| `/piano analyze [piece title]` | Analyse the last voice note you sent (feedback) |
+| `/piano history [N]` / `/piano stats` | Recent sessions / totals |
 | `/model [openrouter\|local\|custom] [model-name]` | View or switch LLM provider |
 
 ## Sample Commands
@@ -146,11 +154,15 @@ Caption examples for photos:
 **5. Check progress**
 
 ```
+/today
+/today @both
 /summary
 /summary @Wife
 /week
 /report @Seba 2026-04-11
 ```
+
+`/today` lists every meal and drink logged today for the targeted profile, numbered and ordered by time, with an inline `❌ N` button per entry. Tapping one hard-deletes that row (from SQLite and the Postgres mirror) and re-renders the message with updated totals — useful for backing out a mistaken `/cal` or recipe log.
 
 **6. Supplements**
 
@@ -164,7 +176,24 @@ Caption examples for photos:
 
 Supplement names cannot contain spaces — use underscores (`Vitamin_D`, not `Vitamin D`). The reminder fires daily at the given `HH:MM`.
 
-**7. Switch LLM provider**
+**7. Piano practice**
+
+```
+/piano piece add Chopin Nocturne by Chopin
+/piano piece add Bach Invention 1 by Bach
+/piano pieces
+/piano log 30 min Chopin Nocturne, scales
+/piano log                           # prompts: reply "25 min Bach" to log
+/piano checkin
+/piano history
+/piano stats
+```
+
+Send a voice note of your playing, then reply `/piano analyze` (optionally with a piece title) — the bot sends the raw audio to a multimodal model which listens directly and returns structured feedback (tempo, rhythm, dynamics, problem areas, next-session focus). Daily practice fires a check-in at `PIANO_CHECKIN_TIME` (default 19:00), skipping days you've already logged.
+
+Two LLM tiers keep costs low: `PIANO_CHAT_MODEL` handles check-ins and log encouragement (cheap/fast text), and `PIANO_ANALYSIS_MODEL` is only called by `/piano analyze`. The analysis model **must accept audio input** via OpenAI-style `input_audio` content blocks — defaults to `google/gemini-2.0-flash-001` (which accepts Telegram's ogg/opus directly). Both are set independently from `/model` so regular `/cal` flow is unaffected.
+
+**8. Switch LLM provider**
 
 ```
 /model
@@ -203,4 +232,4 @@ main.py        — Entry point
 
 - **Primary DB:** SQLite (async via aiosqlite)
 - **Mirror DB:** PostgreSQL (async via asyncpg) — every write is replicated; failures are silent
-- **Scheduler:** APScheduler for supplement reminders and automatic daily summaries
+- **Scheduler:** APScheduler for supplement reminders, daily calorie summaries, and daily piano check-ins
