@@ -19,6 +19,7 @@ from bot.handlers import (
     model,
     piano,
     profiles,
+    review,
     summary,
     supplements,
 )
@@ -27,6 +28,7 @@ from bot.services.llm import init_llm
 from bot.services.scheduler import (
     init_scheduler,
     load_all_reminders,
+    register_daily_review,
     register_daily_summary,
     register_piano_checkin,
     shutdown,
@@ -85,6 +87,7 @@ async def post_init(app: Application) -> None:
         BotCommand("summary", "Show today's meal summary"),
         BotCommand("week", "Last 7 days overview"),
         BotCommand("report", "Daily report for dietitian"),
+        BotCommand("review", "AI review of your day (wins, concerns, suggestions)"),
         BotCommand("goal", "Set daily calorie target"),
         BotCommand("profile", "Manage profiles (add/list/switch/delete/set)"),
         BotCommand("stats", "Show BMR, TDEE and macro targets"),
@@ -99,6 +102,7 @@ async def post_init(app: Application) -> None:
 
     await load_all_reminders(scheduler, app.bot)
     register_daily_summary(scheduler, app.bot)
+    register_daily_review(scheduler, app.bot)
     register_piano_checkin(scheduler, app.bot)
     start(scheduler)
 
@@ -141,6 +145,7 @@ def main() -> None:
     calories.register(app)
     liquids.register(app)
     summary.register(app)
+    review.register(app)
     supplements.register(app)
     model.register(app)
 

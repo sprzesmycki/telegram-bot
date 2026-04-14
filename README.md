@@ -47,6 +47,7 @@ A Telegram bot that tracks daily calorie intake (via photo or text), manages sup
 | `/summary [@name]` | Today's meal summary |
 | `/week [@name]` | Last 7 days overview |
 | `/report [@name] [YYYY-MM-DD]` | Dietitian-ready daily report |
+| `/review [@name] [YYYY-MM-DD]` | AI review of the day — wins, concerns, suggestions |
 | `/goal <kcal> [@name]` | Set daily calorie target (resets macros) |
 | `/stats [@name]` | Calculate BMR, TDEE and macro goals from profile data |
 | `/profile add\|list\|switch\|delete\|set <name>` | Manage profiles and attributes (height, weight, etc.) |
@@ -160,9 +161,14 @@ Caption examples for photos:
 /summary @Wife
 /week
 /report @Seba 2026-04-11
+/review
+/review @Wife
+/review @Seba 2026-04-11
 ```
 
 `/today` lists every meal and drink logged today for the targeted profile, numbered and ordered by time, with an inline `❌ N` button per entry. Tapping one hard-deletes that row (from SQLite and the Postgres mirror) and re-renders the message with updated totals — useful for backing out a mistaken `/cal` or recipe log.
+
+`/review` sends the day's full data (meals, drinks, totals vs. goal, hydration, supplement compliance) to the active LLM and replies with a short coach-style review: **✅ Wins**, **⚠️ Concerns**, **➡️ Tomorrow** — every bullet bilingual (EN / PL). It also fires automatically once per day at `DAILY_REVIEW_TIME` (default `22:00`), one message per profile, skipping profiles with nothing logged that day. Pass `YYYY-MM-DD` to review a past date (supplement compliance is only included for today).
 
 **6. Supplements**
 
@@ -232,4 +238,4 @@ main.py        — Entry point
 
 - **Primary DB:** SQLite (async via aiosqlite)
 - **Mirror DB:** PostgreSQL (async via asyncpg) — every write is replicated; failures are silent
-- **Scheduler:** APScheduler for supplement reminders, daily calorie summaries, and daily piano check-ins
+- **Scheduler:** APScheduler for supplement reminders, daily calorie summaries, daily AI reviews, and daily piano check-ins

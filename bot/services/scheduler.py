@@ -189,6 +189,55 @@ def register_daily_summary(scheduler: AsyncIOScheduler, bot) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Daily nutrition review
+# ---------------------------------------------------------------------------
+
+
+def register_daily_review(scheduler: AsyncIOScheduler, bot) -> None:
+    """Register the daily nutrition review job at DAILY_REVIEW_TIME.
+
+    Runs once per day per profile with data logged today. Skips profiles
+    with no logged meals/drinks so we don't nag users who were off that day.
+    """
+    time_str = os.getenv("DAILY_REVIEW_TIME", "22:00")
+    parts = time_str.split(":")
+    hour, minute = int(parts[0]), int(parts[1])
+
+    async def _send_reviews() -> None:
+        from bot.handlers.review import send_daily_review
+        from bot.services import db_sqlite
+
+        db = db_sqlite.get_db()
+        cursor = await db.execute(
+            "SELECT DISTINCT owner_user_id FROM profiles WHERE active = 1"
+        )
+        rows = await cursor.fetchall()
+        owner_ids = {
+            int(row[0] if isinstance(row, tuple) else row["owner_user_id"])
+            for row in rows
+        }
+
+        for owner_id in owner_ids:
+            owner_profiles = await db_sqlite.list_profiles(owner_id)
+            for profile in owner_profiles:
+                try:
+                    await send_daily_review(bot, owner_id, profile)
+                except Exception:
+                    logger.error(
+                        "Failed to send daily review for owner=%s profile=%s",
+                        owner_id, profile["name"], exc_info=True,
+                    )
+
+    scheduler.add_job(
+        _send_reviews,
+        CronTrigger(hour=hour, minute=minute),
+        id="daily_review",
+        replace_existing=True,
+    )
+    logger.info("Daily review scheduled at %s", time_str)
+
+
+# ---------------------------------------------------------------------------
 # Piano daily check-in
 # ---------------------------------------------------------------------------
 
