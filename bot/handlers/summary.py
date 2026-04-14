@@ -8,23 +8,13 @@ from datetime import date, datetime, timedelta
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
-from bot.handlers.profiles import get_target_profiles
+from bot.handlers.profiles import resolve_single_profile
 from bot.services import db_sqlite
 from bot.utils.formatting import format_report, format_summary, format_week
 
 logger = logging.getLogger(__name__)
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-async def _resolve_single_profile(owner_id: int, text: str) -> dict | None:
-    profiles = await get_target_profiles(owner_id, text)
-    return profiles[0] if profiles else None
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +26,7 @@ async def summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     owner_id = update.effective_user.id
     text = update.message.text or ""
 
-    profile = await _resolve_single_profile(owner_id, text)
+    profile = await resolve_single_profile(owner_id, text)
     if profile is None:
         await update.message.reply_text("Profile not found.")
         return
@@ -60,7 +50,7 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     owner_id = update.effective_user.id
     text = update.message.text or ""
 
-    profile = await _resolve_single_profile(owner_id, text)
+    profile = await resolve_single_profile(owner_id, text)
     if profile is None:
         await update.message.reply_text("Profile not found.")
         return
@@ -111,7 +101,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     owner_id = update.effective_user.id
     text = update.message.text or ""
 
-    profile = await _resolve_single_profile(owner_id, text)
+    profile = await resolve_single_profile(owner_id, text)
     if profile is None:
         await update.message.reply_text("Profile not found.")
         return
@@ -187,6 +177,13 @@ async def send_daily_summary(bot, owner_id: int, profile: dict) -> None:
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
+
+
+COMMANDS: list[tuple[str, str]] = [
+    ("summary", "Show today's meal summary"),
+    ("week", "Last 7 days overview"),
+    ("report", "Daily report for dietitian"),
+]
 
 
 def register(app) -> None:

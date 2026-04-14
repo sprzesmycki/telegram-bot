@@ -131,6 +131,20 @@ CREATE TABLE IF NOT EXISTS liquids (
 """
 
 
+_ADDITIVE_MIGRATIONS = (
+    "ALTER TABLE meals      ADD COLUMN IF NOT EXISTS photo_path      TEXT",
+    "ALTER TABLE supplements ADD COLUMN IF NOT EXISTS dose            TEXT",
+    "ALTER TABLE profiles   ADD COLUMN IF NOT EXISTS height_cm       REAL",
+    "ALTER TABLE profiles   ADD COLUMN IF NOT EXISTS weight_kg       REAL",
+    "ALTER TABLE profiles   ADD COLUMN IF NOT EXISTS age             INTEGER",
+    "ALTER TABLE profiles   ADD COLUMN IF NOT EXISTS gender          TEXT",
+    "ALTER TABLE profiles   ADD COLUMN IF NOT EXISTS activity_level  TEXT",
+    "ALTER TABLE goals      ADD COLUMN IF NOT EXISTS daily_protein_g REAL",
+    "ALTER TABLE goals      ADD COLUMN IF NOT EXISTS daily_carbs_g   REAL",
+    "ALTER TABLE goals      ADD COLUMN IF NOT EXISTS daily_fat_g     REAL",
+)
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -139,7 +153,7 @@ CREATE TABLE IF NOT EXISTS liquids (
 async def init_pg() -> None:
     """Initialise the PostgreSQL connection pool.
 
-    Reads DATABASE_URL from the environment.  If the variable is unset or the
+    Reads DATABASE_URL from the environment. If the variable is unset or the
     connection fails, the pool stays ``None`` and every mirror function becomes
     a silent no-op -- the bot continues with SQLite only.
     """
@@ -154,25 +168,10 @@ async def init_pg() -> None:
         _pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5)
         async with _pool.acquire() as conn:
             await conn.execute(_get_pg_schema())
-            # Idempotent migrations for already-created databases
-            await conn.execute(
-                "ALTER TABLE meals ADD COLUMN IF NOT EXISTS photo_path TEXT"
-            )
-            await conn.execute(
-                "ALTER TABLE supplements ADD COLUMN IF NOT EXISTS dose TEXT"
-            )
-            # Profile columns migrations
-            await conn.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS height_cm REAL")
-            await conn.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS weight_kg REAL")
-            await conn.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS age INTEGER")
-            await conn.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS gender TEXT")
-            await conn.execute("ALTER TABLE profiles ADD COLUMN IF NOT EXISTS activity_level TEXT")
-            # Goal columns migrations
-            await conn.execute("ALTER TABLE goals ADD COLUMN IF NOT EXISTS daily_protein_g REAL")
-            await conn.execute("ALTER TABLE goals ADD COLUMN IF NOT EXISTS daily_carbs_g REAL")
-            await conn.execute("ALTER TABLE goals ADD COLUMN IF NOT EXISTS daily_fat_g REAL")
+            for stmt in _ADDITIVE_MIGRATIONS:
+                await conn.execute(stmt)
         logger.info("PostgreSQL mirror initialised")
-    except (ConnectionRefusedError, asyncpg.PostgresError, OSError, Exception) as exc:
+    except Exception as exc:
         logger.warning("PostgreSQL mirror unavailable: %s", exc)
         _pool = None
 
@@ -191,55 +190,96 @@ async def close_pg() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mirror functions
+# Mirror helper
+# ---------------------------------------------------------------------------
+
+
+async def _exec(label: str, sql: str, *args) -> None:
+    """Run *sql* on the mirror pool, silently no-op'ing when it's unavailable.
+
+    Mirrors are best-effort: we never raise back to the caller — SQLite is the
+    source of truth. *label* is used solely for error logs.
+    """
+    if _pool is None:
+        return
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute(sql, *args)
+    except Exception:
+        logger.error("pg %s failed", label, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Mirror functions — profiles
 # ---------------------------------------------------------------------------
 
 
 async def mirror_create_profile(profile_id: int, owner_id: int, name: str) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO profiles (id, owner_user_id, name, active) "
-                "VALUES ($1, $2, $3, TRUE) ON CONFLICT DO NOTHING",
-                profile_id,
-                owner_id,
-                name,
-            )
-    except Exception:
-        logger.error("pg mirror_create_profile failed", exc_info=True)
+    await _exec(
+        "mirror_create_profile",
+        "INSERT INTO profiles (id, owner_user_id, name, active) "
+        "VALUES ($1, $2, $3, TRUE) ON CONFLICT DO NOTHING",
+        profile_id, owner_id, name,
+    )
 
 
 async def mirror_set_active_profile(owner_id: int, profile_id: int) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO active_profile (user_id, profile_id) "
-                "VALUES ($1, $2) "
-                "ON CONFLICT (user_id) DO UPDATE SET profile_id = $2",
-                owner_id,
-                profile_id,
-            )
-    except Exception:
-        logger.error("pg mirror_set_active_profile failed", exc_info=True)
+    await _exec(
+        "mirror_set_active_profile",
+        "INSERT INTO active_profile (user_id, profile_id) VALUES ($1, $2) "
+        "ON CONFLICT (user_id) DO UPDATE SET profile_id = $2",
+        owner_id, profile_id,
+    )
 
 
 async def mirror_delete_profile(owner_id: int, name: str) -> None:
-    if _pool is None:
+    await _exec(
+        "mirror_delete_profile",
+        "UPDATE profiles SET active = FALSE "
+        "WHERE owner_user_id = $1 AND name = $2",
+        owner_id, name,
+    )
+
+
+async def mirror_update_profile(
+    profile_id: int,
+    owner_id: int,
+    height_cm: float | None = None,
+    weight_kg: float | None = None,
+    age: int | None = None,
+    gender: str | None = None,
+    activity_level: str | None = None,
+) -> None:
+    # Dynamic SET clause — only touch fields the caller actually provided.
+    fields = [
+        ("height_cm", height_cm),
+        ("weight_kg", weight_kg),
+        ("age", age),
+        ("gender", gender),
+        ("activity_level", activity_level),
+    ]
+    updates: list[str] = []
+    params: list[object] = []
+    for column, value in fields:
+        if value is None:
+            continue
+        params.append(value)
+        updates.append(f"{column} = ${len(params)}")
+
+    if not updates:
         return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE profiles SET active = FALSE "
-                "WHERE owner_user_id = $1 AND name = $2",
-                owner_id,
-                name,
-            )
-    except Exception:
-        logger.error("pg mirror_delete_profile failed", exc_info=True)
+
+    params.extend([profile_id, owner_id])
+    sql = (
+        f"UPDATE profiles SET {', '.join(updates)} "
+        f"WHERE id = ${len(params) - 1} AND owner_user_id = ${len(params)}"
+    )
+    await _exec("mirror_update_profile", sql, *params)
+
+
+# ---------------------------------------------------------------------------
+# Mirror functions — meals & liquids
+# ---------------------------------------------------------------------------
 
 
 async def mirror_log_meal(
@@ -255,30 +295,16 @@ async def mirror_log_meal(
     raw_llm: str,
     photo_path: str | None = None,
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO meals "
-                "(id, profile_id, owner_user_id, eaten_at, description, "
-                "calories, protein_g, carbs_g, fat_g, raw_llm_response, photo_path) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
-                "ON CONFLICT DO NOTHING",
-                meal_id,
-                profile_id,
-                owner_id,
-                eaten_at,
-                description,
-                calories,
-                protein_g,
-                carbs_g,
-                fat_g,
-                raw_llm,
-                photo_path,
-            )
-    except Exception:
-        logger.error("pg mirror_log_meal failed", exc_info=True)
+    await _exec(
+        "mirror_log_meal",
+        "INSERT INTO meals "
+        "(id, profile_id, owner_user_id, eaten_at, description, "
+        "calories, protein_g, carbs_g, fat_g, raw_llm_response, photo_path) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+        "ON CONFLICT DO NOTHING",
+        meal_id, profile_id, owner_id, eaten_at, description,
+        calories, protein_g, carbs_g, fat_g, raw_llm, photo_path,
+    )
 
 
 async def mirror_log_liquid(
@@ -294,56 +320,37 @@ async def mirror_log_liquid(
     fat_g: float,
     raw_llm: str,
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO liquids "
-                "(id, profile_id, owner_user_id, drunk_at, description, "
-                "amount_ml, calories, protein_g, carbs_g, fat_g, raw_llm_response) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
-                "ON CONFLICT DO NOTHING",
-                liquid_id,
-                profile_id,
-                owner_id,
-                drunk_at,
-                description,
-                amount_ml,
-                calories,
-                protein_g,
-                carbs_g,
-                fat_g,
-                raw_llm,
-            )
-    except Exception:
-        logger.error("pg mirror_log_liquid failed", exc_info=True)
+    await _exec(
+        "mirror_log_liquid",
+        "INSERT INTO liquids "
+        "(id, profile_id, owner_user_id, drunk_at, description, "
+        "amount_ml, calories, protein_g, carbs_g, fat_g, raw_llm_response) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+        "ON CONFLICT DO NOTHING",
+        liquid_id, profile_id, owner_id, drunk_at, description,
+        amount_ml, calories, protein_g, carbs_g, fat_g, raw_llm,
+    )
 
 
 async def mirror_delete_meal(meal_id: int, owner_id: int) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM meals WHERE id = $1 AND owner_user_id = $2",
-                meal_id, owner_id,
-            )
-    except Exception:
-        logger.error("pg mirror_delete_meal failed", exc_info=True)
+    await _exec(
+        "mirror_delete_meal",
+        "DELETE FROM meals WHERE id = $1 AND owner_user_id = $2",
+        meal_id, owner_id,
+    )
 
 
 async def mirror_delete_liquid(liquid_id: int, owner_id: int) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM liquids WHERE id = $1 AND owner_user_id = $2",
-                liquid_id, owner_id,
-            )
-    except Exception:
-        logger.error("pg mirror_delete_liquid failed", exc_info=True)
+    await _exec(
+        "mirror_delete_liquid",
+        "DELETE FROM liquids WHERE id = $1 AND owner_user_id = $2",
+        liquid_id, owner_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mirror functions — goals & supplements
+# ---------------------------------------------------------------------------
 
 
 async def mirror_set_goal(
@@ -353,23 +360,16 @@ async def mirror_set_goal(
     carbs_g: float | None = None,
     fat_g: float | None = None,
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO goals (profile_id, daily_calories, daily_protein_g, daily_carbs_g, daily_fat_g) "
-                "VALUES ($1, $2, $3, $4, $5) "
-                "ON CONFLICT (profile_id) DO UPDATE SET "
-                "daily_calories = $2, daily_protein_g = $3, daily_carbs_g = $4, daily_fat_g = $5",
-                profile_id,
-                daily_calories,
-                protein_g,
-                carbs_g,
-                fat_g,
-            )
-    except Exception:
-        logger.error("pg mirror_set_goal failed", exc_info=True)
+    await _exec(
+        "mirror_set_goal",
+        "INSERT INTO goals "
+        "(profile_id, daily_calories, daily_protein_g, daily_carbs_g, daily_fat_g) "
+        "VALUES ($1, $2, $3, $4, $5) "
+        "ON CONFLICT (profile_id) DO UPDATE SET "
+        "daily_calories = $2, daily_protein_g = $3, "
+        "daily_carbs_g = $4, daily_fat_g = $5",
+        profile_id, daily_calories, protein_g, carbs_g, fat_g,
+    )
 
 
 async def mirror_add_supplement(
@@ -380,111 +380,40 @@ async def mirror_add_supplement(
     reminder_time: str,
     dose: str | None = None,
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO supplements "
-                "(id, profile_id, owner_user_id, name, reminder_time, dose, active) "
-                "VALUES ($1, $2, $3, $4, $5, $6, TRUE) "
-                "ON CONFLICT DO NOTHING",
-                supplement_id,
-                profile_id,
-                owner_id,
-                name,
-                reminder_time,
-                dose,
-            )
-    except Exception:
-        logger.error("pg mirror_add_supplement failed", exc_info=True)
+    await _exec(
+        "mirror_add_supplement",
+        "INSERT INTO supplements "
+        "(id, profile_id, owner_user_id, name, reminder_time, dose, active) "
+        "VALUES ($1, $2, $3, $4, $5, $6, TRUE) "
+        "ON CONFLICT DO NOTHING",
+        supplement_id, profile_id, owner_id, name, reminder_time, dose,
+    )
 
 
 async def mirror_remove_supplement(
     profile_id: int, owner_id: int, name: str
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE supplements SET active = FALSE "
-                "WHERE profile_id = $1 AND owner_user_id = $2 AND name = $3",
-                profile_id,
-                owner_id,
-                name,
-            )
-    except Exception:
-        logger.error("pg mirror_remove_supplement failed", exc_info=True)
+    await _exec(
+        "mirror_remove_supplement",
+        "UPDATE supplements SET active = FALSE "
+        "WHERE profile_id = $1 AND owner_user_id = $2 AND name = $3",
+        profile_id, owner_id, name,
+    )
 
 
 async def mirror_log_supplement_taken(
     log_id: int, supplement_id: int, profile_id: int
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO supplement_logs (id, supplement_id, profile_id) "
-                "VALUES ($1, $2, $3) "
-                "ON CONFLICT DO NOTHING",
-                log_id,
-                supplement_id,
-                profile_id,
-            )
-    except Exception:
-        logger.error("pg mirror_log_supplement_taken failed", exc_info=True)
-
-async def mirror_update_profile(
-    profile_id: int,
-    owner_id: int,
-    height_cm: float | None = None,
-    weight_kg: float | None = None,
-    age: int | None = None,
-    gender: str | None = None,
-    activity_level: str | None = None,
-) -> None:
-    if _pool is None:
-        return
-    try:
-        updates = []
-        params = []
-        i = 1
-        if height_cm is not None:
-            updates.append(f"height_cm = ${i}")
-            params.append(height_cm)
-            i += 1
-        if weight_kg is not None:
-            updates.append(f"weight_kg = ${i}")
-            params.append(weight_kg)
-            i += 1
-        if age is not None:
-            updates.append(f"age = ${i}")
-            params.append(age)
-            i += 1
-        if gender is not None:
-            updates.append(f"gender = ${i}")
-            params.append(gender)
-            i += 1
-        if activity_level is not None:
-            updates.append(f"activity_level = ${i}")
-            params.append(activity_level)
-            i += 1
-
-        if not updates:
-            return
-
-        params.extend([profile_id, owner_id])
-        sql = f"UPDATE profiles SET {', '.join(updates)} WHERE id = ${i} AND owner_user_id = ${i+1}"
-        async with _pool.acquire() as conn:
-            await conn.execute(sql, *params)
-    except Exception:
-        logger.error("pg mirror_update_profile failed", exc_info=True)
+    await _exec(
+        "mirror_log_supplement_taken",
+        "INSERT INTO supplement_logs (id, supplement_id, profile_id) "
+        "VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        log_id, supplement_id, profile_id,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Piano mirrors
+# Mirror functions — piano
 # ---------------------------------------------------------------------------
 
 
@@ -496,24 +425,14 @@ async def mirror_log_piano_session(
     notes: str | None,
     pieces_practiced_json: str,
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO piano_sessions "
-                "(id, owner_user_id, practiced_at, duration_minutes, notes, pieces_practiced) "
-                "VALUES ($1, $2, $3, $4, $5, $6) "
-                "ON CONFLICT DO NOTHING",
-                session_id,
-                owner_id,
-                practiced_at,
-                duration_minutes,
-                notes,
-                pieces_practiced_json,
-            )
-    except Exception:
-        logger.error("pg mirror_log_piano_session failed", exc_info=True)
+    await _exec(
+        "mirror_log_piano_session",
+        "INSERT INTO piano_sessions "
+        "(id, owner_user_id, practiced_at, duration_minutes, notes, pieces_practiced) "
+        "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+        session_id, owner_id, practiced_at,
+        duration_minutes, notes, pieces_practiced_json,
+    )
 
 
 async def mirror_add_piano_piece(
@@ -522,90 +441,54 @@ async def mirror_add_piano_piece(
     title: str,
     composer: str | None,
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO piano_pieces "
-                "(id, owner_user_id, title, composer, status) "
-                "VALUES ($1, $2, $3, $4, 'learning') "
-                "ON CONFLICT DO NOTHING",
-                piece_id,
-                owner_id,
-                title,
-                composer,
-            )
-    except Exception:
-        logger.error("pg mirror_add_piano_piece failed", exc_info=True)
+    await _exec(
+        "mirror_add_piano_piece",
+        "INSERT INTO piano_pieces "
+        "(id, owner_user_id, title, composer, status) "
+        "VALUES ($1, $2, $3, $4, 'learning') ON CONFLICT DO NOTHING",
+        piece_id, owner_id, title, composer,
+    )
 
 
 async def mirror_remove_piano_piece(owner_id: int, piece_id: int) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM piano_pieces WHERE id = $1 AND owner_user_id = $2",
-                piece_id,
-                owner_id,
-            )
-    except Exception:
-        logger.error("pg mirror_remove_piano_piece failed", exc_info=True)
+    await _exec(
+        "mirror_remove_piano_piece",
+        "DELETE FROM piano_pieces WHERE id = $1 AND owner_user_id = $2",
+        piece_id, owner_id,
+    )
 
 
 async def mirror_update_piano_piece_status(
     owner_id: int, piece_id: int, status: str
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE piano_pieces SET status = $1 "
-                "WHERE id = $2 AND owner_user_id = $3",
-                status,
-                piece_id,
-                owner_id,
-            )
-    except Exception:
-        logger.error("pg mirror_update_piano_piece_status failed", exc_info=True)
+    await _exec(
+        "mirror_update_piano_piece_status",
+        "UPDATE piano_pieces SET status = $1 "
+        "WHERE id = $2 AND owner_user_id = $3",
+        status, piece_id, owner_id,
+    )
 
 
 async def mirror_update_piano_piece_note(
     owner_id: int, piece_id: int, notes: str
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE piano_pieces SET notes = $1 "
-                "WHERE id = $2 AND owner_user_id = $3",
-                notes,
-                piece_id,
-                owner_id,
-            )
-    except Exception:
-        logger.error("pg mirror_update_piano_piece_note failed", exc_info=True)
+    await _exec(
+        "mirror_update_piano_piece_note",
+        "UPDATE piano_pieces SET notes = $1 "
+        "WHERE id = $2 AND owner_user_id = $3",
+        notes, piece_id, owner_id,
+    )
 
 
 async def mirror_touch_piano_piece_last_practiced(
     owner_id: int, piece_id: int, practiced_at
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE piano_pieces SET last_practiced_at = $1 "
-                "WHERE id = $2 AND owner_user_id = $3",
-                practiced_at,
-                piece_id,
-                owner_id,
-            )
-    except Exception:
-        logger.error("pg mirror_touch_piano_piece_last_practiced failed", exc_info=True)
+    await _exec(
+        "mirror_touch_piano_piece_last_practiced",
+        "UPDATE piano_pieces SET last_practiced_at = $1 "
+        "WHERE id = $2 AND owner_user_id = $3",
+        practiced_at, piece_id, owner_id,
+    )
 
 
 async def mirror_upsert_piano_streak(
@@ -614,23 +497,15 @@ async def mirror_upsert_piano_streak(
     longest_streak: int,
     last_practiced_date,
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO piano_streak "
-                "(owner_user_id, current_streak, longest_streak, last_practiced_date) "
-                "VALUES ($1, $2, $3, $4) "
-                "ON CONFLICT (owner_user_id) DO UPDATE SET "
-                "current_streak = $2, longest_streak = $3, last_practiced_date = $4",
-                owner_id,
-                current_streak,
-                longest_streak,
-                last_practiced_date,
-            )
-    except Exception:
-        logger.error("pg mirror_upsert_piano_streak failed", exc_info=True)
+    await _exec(
+        "mirror_upsert_piano_streak",
+        "INSERT INTO piano_streak "
+        "(owner_user_id, current_streak, longest_streak, last_practiced_date) "
+        "VALUES ($1, $2, $3, $4) "
+        "ON CONFLICT (owner_user_id) DO UPDATE SET "
+        "current_streak = $2, longest_streak = $3, last_practiced_date = $4",
+        owner_id, current_streak, longest_streak, last_practiced_date,
+    )
 
 
 async def mirror_add_piano_recording(
@@ -642,23 +517,12 @@ async def mirror_add_piano_recording(
     feedback_summary: str | None,
     raw_analysis: str | None,
 ) -> None:
-    if _pool is None:
-        return
-    try:
-        async with _pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO piano_recordings "
-                "(id, owner_user_id, piece_id, file_path, duration_seconds, "
-                "feedback_summary, raw_analysis) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7) "
-                "ON CONFLICT DO NOTHING",
-                recording_id,
-                owner_id,
-                piece_id,
-                file_path,
-                duration_seconds,
-                feedback_summary,
-                raw_analysis,
-            )
-    except Exception:
-        logger.error("pg mirror_add_piano_recording failed", exc_info=True)
+    await _exec(
+        "mirror_add_piano_recording",
+        "INSERT INTO piano_recordings "
+        "(id, owner_user_id, piece_id, file_path, duration_seconds, "
+        "feedback_summary, raw_analysis) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+        recording_id, owner_id, piece_id, file_path,
+        duration_seconds, feedback_summary, raw_analysis,
+    )

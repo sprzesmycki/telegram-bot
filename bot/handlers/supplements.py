@@ -6,9 +6,9 @@ import re
 from telegram import Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
-from bot.handlers.profiles import get_target_profiles
+from bot.handlers.profiles import resolve_single_profile
 from bot.services import db_postgres, db_sqlite
-from bot.utils.formatting import format_supplement_list, parse_target
+from bot.utils.formatting import format_supplement_list
 
 logger = logging.getLogger(__name__)
 
@@ -21,16 +21,6 @@ USAGE = (
     "/supplement done <name> [@profile]\n"
     "/supplement remove <name> [@profile]"
 )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-async def _resolve_single_profile(owner_id: int, text: str) -> dict | None:
-    profiles = await get_target_profiles(owner_id, text)
-    return profiles[0] if profiles else None
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +78,7 @@ async def _supplement_add(
     # Optional dose: next arg if present and not a @profile token
     dose = args[3] if len(args) >= 4 and not args[3].startswith("@") else None
 
-    profile = await _resolve_single_profile(owner_id, text)
+    profile = await resolve_single_profile(owner_id, text)
     if profile is None:
         await update.message.reply_text("Profile not found.")
         return
@@ -128,7 +118,7 @@ async def _supplement_add(
 async def _supplement_list(
     update: Update, owner_id: int, text: str,
 ) -> None:
-    profile = await _resolve_single_profile(owner_id, text)
+    profile = await resolve_single_profile(owner_id, text)
     if profile is None:
         await update.message.reply_text("Profile not found.")
         return
@@ -150,7 +140,7 @@ async def _supplement_done(
         return
 
     name = args[1]
-    profile = await _resolve_single_profile(owner_id, text)
+    profile = await resolve_single_profile(owner_id, text)
     if profile is None:
         await update.message.reply_text("Profile not found.")
         return
@@ -181,7 +171,7 @@ async def _supplement_remove(
         return
 
     name = args[1]
-    profile = await _resolve_single_profile(owner_id, text)
+    profile = await resolve_single_profile(owner_id, text)
     if profile is None:
         await update.message.reply_text("Profile not found.")
         return
@@ -276,6 +266,11 @@ async def register_existing_reminders(scheduler, bot) -> None:
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
+
+
+COMMANDS: list[tuple[str, str]] = [
+    ("supplement", "Manage supplements (add/list/done/remove)"),
+]
 
 
 def register(app) -> None:

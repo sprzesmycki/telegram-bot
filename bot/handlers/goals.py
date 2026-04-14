@@ -59,5 +59,10 @@ async def goal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 
 
+COMMANDS: list[tuple[str, str]] = [
+    ("goal", "Set daily calorie target"),
+]
+
+
 def register(app) -> None:
     app.add_handler(CommandHandler("goal", goal_cmd))
