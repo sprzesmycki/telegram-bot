@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+from typing import Callable
 
 import openai
 from openai import AsyncOpenAI
@@ -34,7 +35,9 @@ _current_client: AsyncOpenAI | None = None
 _current_model: str | None = None
 
 
-def _build_client(provider: str, model_override: str | None = None) -> tuple[AsyncOpenAI, str, str]:
+def _build_client(
+    provider: str, model_override: str | None = None,
+) -> tuple[AsyncOpenAI, str, str]:
     """Build an AsyncOpenAI client for the given provider.
 
     Returns (client, model, provider).
@@ -57,7 +60,9 @@ def _build_client(provider: str, model_override: str | None = None) -> tuple[Asy
             api_key=os.getenv("OPENROUTER_API_KEY"),
             base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         )
-        model = model_override or os.getenv("OPENROUTER_MODEL", "anthropic/claude-3-5-sonnet")
+        model = model_override or os.getenv(
+            "OPENROUTER_MODEL", "anthropic/claude-3-5-sonnet"
+        )
 
     return client, model, provider
 
@@ -68,7 +73,10 @@ def init_llm() -> None:
 
     provider = os.getenv("LLM_PROVIDER", "openrouter")
     _current_client, _current_model, _current_provider = _build_client(provider)
-    logger.debug("LLM initialised: provider=%s model=%s", _current_provider, _current_model)
+    logger.debug(
+        "LLM initialised: provider=%s model=%s",
+        _current_provider, _current_model,
+    )
 
 
 def get_llm_client(model_override: str | None = None) -> tuple[AsyncOpenAI, str]:
@@ -90,8 +98,13 @@ def switch_provider(provider: str, model_override: str | None = None) -> None:
     """Rebuild the LLM client in-place for a different provider."""
     global _current_provider, _current_client, _current_model
 
-    _current_client, _current_model, _current_provider = _build_client(provider, model_override)
-    logger.debug("LLM switched: provider=%s model=%s", _current_provider, _current_model)
+    _current_client, _current_model, _current_provider = _build_client(
+        provider, model_override,
+    )
+    logger.debug(
+        "LLM switched: provider=%s model=%s",
+        _current_provider, _current_model,
+    )
 
 
 def get_provider_info() -> dict:
@@ -110,6 +123,11 @@ def get_provider_info() -> dict:
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
 
+_RETRY_NUDGE = (
+    "Your previous response was not valid JSON. You MUST return valid "
+    "JSON only{schema_hint}. No markdown fences, no explanation."
+)
+
 
 def _parse_json_response(content: str) -> dict:
     """Strip optional markdown fences and parse JSON."""
@@ -117,6 +135,62 @@ def _parse_json_response(content: str) -> dict:
     if match:
         content = match.group(1)
     return json.loads(content)
+
+
+async def _call_and_parse_json(
+    *,
+    label: str,
+    messages: list[dict],
+    schema_hint: str = "",
+    post_process: Callable[[dict], dict] | None = None,
+    model_override: str | None = None,
+    temperature: float = 0.3,
+) -> dict:
+    """Call the LLM, parse JSON, retry once if parsing fails.
+
+    *label* is used purely for logs (e.g. "analyze_meal").
+    *schema_hint* is appended to the retry prompt to remind the model which
+    fields are required (e.g. "with both description_en and description_pl fields").
+    *post_process* is an optional transformer applied to the parsed dict
+    before returning (e.g. combining bilingual fields).
+    Raises ``LLMParseError`` when parsing fails after one retry.
+    """
+    client, model = get_llm_client(model_override=model_override)
+    logger.debug("%s: model=%s", label, model)
+
+    response = await client.chat.completions.create(
+        model=model, messages=messages, temperature=temperature,
+    )
+    content = response.choices[0].message.content or ""
+    logger.debug("%s raw response: %s", label, content)
+
+    try:
+        result = _parse_json_response(content)
+        return post_process(result) if post_process else result
+    except json.JSONDecodeError:
+        logger.debug("%s: first JSON parse failed, retrying", label)
+
+    hint = f" {schema_hint}" if schema_hint else ""
+    messages = [
+        *messages,
+        {"role": "assistant", "content": content},
+        {"role": "user", "content": _RETRY_NUDGE.format(schema_hint=hint)},
+    ]
+
+    retry_response = await client.chat.completions.create(
+        model=model, messages=messages, temperature=temperature,
+    )
+    retry_content = retry_response.choices[0].message.content or ""
+    logger.debug("%s retry response: %s", label, retry_content)
+
+    try:
+        result = _parse_json_response(retry_content)
+        return post_process(result) if post_process else result
+    except json.JSONDecodeError as exc:
+        logger.error("%s: JSON parse failed after retry: %s", label, retry_content)
+        raise LLMParseError(
+            f"Failed to parse LLM response as JSON: {retry_content}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -140,21 +214,56 @@ _MEAL_SYSTEM = (
     "fist is roughly 250ml/1 cup, a palm is ~100g of meat)."
 )
 
+_LIQUID_SYSTEM = (
+    "You are a nutrition assistant specialized in liquids and hydration. "
+    "Always return valid JSON only, no markdown, no prose, no code fences. "
+    "Schema (ALL fields REQUIRED): "
+    '{"amount_ml": int, "calories": int, "protein_g": float, "carbs_g": float, '
+    '"fat_g": float, "description_en": str, "description_pl": str}. '
+    '"description_en" is a short English label for the drink (e.g. "Black coffee"). '
+    '"description_pl" is the SAME drink translated to Polish (e.g. "Czarna kawa"). '
+    "Always estimate numeric values, never refuse. "
+    "If the user doesn't specify an amount, assume a standard glass (250ml)."
+)
 
-def _combine_bilingual_description(result: dict) -> dict:
-    """Post-process an analyze_meal result: combine description_en + description_pl.
+_RECIPE_SYSTEM = (
+    "Given a recipe, calculate total calories and macros for the whole dish, "
+    "then divide by servings. Return valid JSON only, no markdown, no prose. "
+    "Schema (ALL fields REQUIRED): "
+    '{"total": {"calories": int, "protein_g": float, "carbs_g": float, "fat_g": float}, '
+    '"per_serving": {"calories": int, "protein_g": float, "carbs_g": float, "fat_g": float}, '
+    '"servings": int, "dish_name_en": str, "dish_name_pl": str}. '
+    '"dish_name_en" is a short English name for the dish. '
+    '"dish_name_pl" is the SAME dish translated to Polish. '
+    "Both name fields are mandatory — never omit either. "
+    'Example: {"dish_name_en": "Creamy tomato pasta", '
+    '"dish_name_pl": "Makaron w sosie pomidorowym", ...}. '
+    "Always estimate, never refuse."
+)
 
-    Sets ``result["description"]`` to ``"<en> / <pl>"`` so downstream code
-    (DB storage, formatting) can keep using a single string. Preserves the
-    original split fields for callers that want them.
+
+def _combine_bilingual(result: dict, *, key: str, en: str, pl: str) -> dict:
+    """Combine ``<en_field>`` + ``<pl_field>`` into a single ``<key>`` field.
+
+    Used to collapse description_en/description_pl (meals, liquids) and
+    dish_name_en/dish_name_pl (recipes) into ``"<en>\\n<pl>"`` for DB storage.
+    Preserves the original split fields for callers that want them.
     """
-    en = (result.get("description_en") or "").strip()
-    pl = (result.get("description_pl") or "").strip()
-    if en and pl:
-        result["description"] = f"{en}\n{pl}"
-    elif en or pl:
-        result["description"] = en or pl
+    en_val = (result.get(en) or "").strip()
+    pl_val = (result.get(pl) or "").strip()
+    if en_val and pl_val:
+        result[key] = f"{en_val}\n{pl_val}"
+    elif en_val or pl_val:
+        result[key] = en_val or pl_val
     return result
+
+
+def _combine_meal(result: dict) -> dict:
+    return _combine_bilingual(result, key="description", en="description_en", pl="description_pl")
+
+
+def _combine_recipe(result: dict) -> dict:
+    return _combine_bilingual(result, key="dish_name", en="dish_name_en", pl="dish_name_pl")
 
 
 async def analyze_meal(description: str, image_base64: str | None = None) -> dict:
@@ -164,8 +273,6 @@ async def analyze_meal(description: str, image_base64: str | None = None) -> dic
     Raises ``VisionNotSupportedError`` when the model cannot handle images.
     Raises ``LLMParseError`` when the model fails to return valid JSON.
     """
-    client, model = get_llm_client()
-
     if image_base64 is not None:
         hint = (description or "").strip()
         if hint and hint.lower() != "analyze this meal":
@@ -187,75 +294,25 @@ async def analyze_meal(description: str, image_base64: str | None = None) -> dic
     else:
         user_content = description
 
-    messages: list[dict] = [
+    messages = [
         {"role": "system", "content": _MEAL_SYSTEM},
         {"role": "user", "content": user_content},
     ]
 
-    logger.debug("analyze_meal: model=%s image=%s", model, image_base64 is not None)
-
     try:
-        response = await client.chat.completions.create(
-            model=model,
+        return await _call_and_parse_json(
+            label="analyze_meal",
             messages=messages,
-            temperature=0.3,
+            schema_hint="with both description_en and description_pl fields",
+            post_process=_combine_meal,
         )
     except openai.BadRequestError:
         if image_base64 is not None:
+            _, model = get_llm_client()
             raise VisionNotSupportedError(
                 f"The current model ({model}) does not support vision/image inputs."
             )
         raise
-
-    content = response.choices[0].message.content or ""
-    logger.debug("analyze_meal raw response: %s", content)
-
-    try:
-        return _combine_bilingual_description(_parse_json_response(content))
-    except json.JSONDecodeError:
-        logger.debug("analyze_meal: first JSON parse failed, retrying")
-
-    # Retry once with an explicit JSON-only nudge
-    messages.append({"role": "assistant", "content": content})
-    messages.append({
-        "role": "user",
-        "content": (
-            "Your previous response was not valid JSON. You MUST return valid "
-            "JSON only with both description_en and description_pl fields. "
-            "No markdown fences, no explanation."
-        ),
-    })
-
-    retry_response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.3,
-    )
-    retry_content = retry_response.choices[0].message.content or ""
-    logger.debug("analyze_meal retry response: %s", retry_content)
-
-    try:
-        return _combine_bilingual_description(_parse_json_response(retry_content))
-    except json.JSONDecodeError as exc:
-        logger.error("analyze_meal: JSON parse failed after retry: %s", retry_content)
-        raise LLMParseError(f"Failed to parse LLM response as JSON: {retry_content}") from exc
-
-
-# ---------------------------------------------------------------------------
-# Liquid analysis
-# ---------------------------------------------------------------------------
-
-_LIQUID_SYSTEM = (
-    "You are a nutrition assistant specialized in liquids and hydration. "
-    "Always return valid JSON only, no markdown, no prose, no code fences. "
-    "Schema (ALL fields REQUIRED): "
-    '{"amount_ml": int, "calories": int, "protein_g": float, "carbs_g": float, '
-    '"fat_g": float, "description_en": str, "description_pl": str}. '
-    '"description_en" is a short English label for the drink (e.g. "Black coffee"). '
-    '"description_pl" is the SAME drink translated to Polish (e.g. "Czarna kawa"). '
-    "Always estimate numeric values, never refuse. "
-    "If the user doesn't specify an amount, assume a standard glass (250ml)."
-)
 
 
 async def analyze_liquid(description: str) -> dict:
@@ -264,84 +321,16 @@ async def analyze_liquid(description: str) -> dict:
     Returns dict with keys: amount_ml, calories, protein_g, carbs_g, fat_g, description.
     Raises ``LLMParseError`` when the model fails to return valid JSON.
     """
-    client, model = get_llm_client()
-
-    messages: list[dict] = [
+    messages = [
         {"role": "system", "content": _LIQUID_SYSTEM},
         {"role": "user", "content": description},
     ]
-
-    logger.debug("analyze_liquid: model=%s", model)
-
-    response = await client.chat.completions.create(
-        model=model,
+    return await _call_and_parse_json(
+        label="analyze_liquid",
         messages=messages,
-        temperature=0.3,
+        schema_hint="with both description_en and description_pl fields",
+        post_process=_combine_meal,
     )
-
-    content = response.choices[0].message.content or ""
-    logger.debug("analyze_liquid raw response: %s", content)
-
-    try:
-        return _combine_bilingual_description(_parse_json_response(content))
-    except json.JSONDecodeError:
-        logger.debug("analyze_liquid: first JSON parse failed, retrying")
-
-    # Retry once
-    messages.append({"role": "assistant", "content": content})
-    messages.append({
-        "role": "user",
-        "content": (
-            "Your previous response was not valid JSON. You MUST return valid "
-            "JSON only with both description_en and description_pl fields. "
-            "No markdown fences, no explanation."
-        ),
-    })
-
-    retry_response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.3,
-    )
-    retry_content = retry_response.choices[0].message.content or ""
-    logger.debug("analyze_liquid retry response: %s", retry_content)
-
-    try:
-        return _combine_bilingual_description(_parse_json_response(retry_content))
-    except json.JSONDecodeError as exc:
-        logger.error("analyze_liquid: JSON parse failed after retry: %s", retry_content)
-        raise LLMParseError(f"Failed to parse LLM response as JSON: {retry_content}") from exc
-
-
-# ---------------------------------------------------------------------------
-# Recipe analysis
-# ---------------------------------------------------------------------------
-
-_RECIPE_SYSTEM = (
-    "Given a recipe, calculate total calories and macros for the whole dish, "
-    "then divide by servings. Return valid JSON only, no markdown, no prose. "
-    "Schema (ALL fields REQUIRED): "
-    '{"total": {"calories": int, "protein_g": float, "carbs_g": float, "fat_g": float}, '
-    '"per_serving": {"calories": int, "protein_g": float, "carbs_g": float, "fat_g": float}, '
-    '"servings": int, "dish_name_en": str, "dish_name_pl": str}. '
-    '"dish_name_en" is a short English name for the dish. '
-    '"dish_name_pl" is the SAME dish translated to Polish. '
-    "Both name fields are mandatory — never omit either. "
-    'Example: {"dish_name_en": "Creamy tomato pasta", '
-    '"dish_name_pl": "Makaron w sosie pomidorowym", ...}. '
-    "Always estimate, never refuse."
-)
-
-
-def _combine_bilingual_dish_name(result: dict) -> dict:
-    """Post-process an analyze_recipe result: combine dish_name_en + dish_name_pl."""
-    en = (result.get("dish_name_en") or "").strip()
-    pl = (result.get("dish_name_pl") or "").strip()
-    if en and pl:
-        result["dish_name"] = f"{en}\n{pl}"
-    elif en or pl:
-        result["dish_name"] = en or pl
-    return result
 
 
 async def analyze_recipe(recipe_text: str, servings: int | None = None) -> dict:
@@ -349,57 +338,20 @@ async def analyze_recipe(recipe_text: str, servings: int | None = None) -> dict:
 
     Raises ``LLMParseError`` when the model fails to return valid JSON.
     """
-    client, model = get_llm_client()
-
     user_text = recipe_text
     if servings is not None:
         user_text += f"\n\nServings: {servings}"
 
-    messages: list[dict] = [
+    messages = [
         {"role": "system", "content": _RECIPE_SYSTEM},
         {"role": "user", "content": user_text},
     ]
-
-    logger.debug("analyze_recipe: model=%s servings=%s", model, servings)
-
-    response = await client.chat.completions.create(
-        model=model,
+    return await _call_and_parse_json(
+        label="analyze_recipe",
         messages=messages,
-        temperature=0.3,
+        schema_hint="with both dish_name_en and dish_name_pl fields",
+        post_process=_combine_recipe,
     )
-
-    content = response.choices[0].message.content or ""
-    logger.debug("analyze_recipe raw response: %s", content)
-
-    try:
-        return _combine_bilingual_dish_name(_parse_json_response(content))
-    except json.JSONDecodeError:
-        logger.debug("analyze_recipe: first JSON parse failed, retrying")
-
-    # Retry once
-    messages.append({"role": "assistant", "content": content})
-    messages.append({
-        "role": "user",
-        "content": (
-            "Your previous response was not valid JSON. You MUST return valid "
-            "JSON only with both dish_name_en and dish_name_pl fields. "
-            "No markdown fences, no explanation."
-        ),
-    })
-
-    retry_response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.3,
-    )
-    retry_content = retry_response.choices[0].message.content or ""
-    logger.debug("analyze_recipe retry response: %s", retry_content)
-
-    try:
-        return _combine_bilingual_dish_name(_parse_json_response(retry_content))
-    except json.JSONDecodeError as exc:
-        logger.error("analyze_recipe: JSON parse failed after retry: %s", retry_content)
-        raise LLMParseError(f"Failed to parse LLM response as JSON: {retry_content}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -419,14 +371,14 @@ def compress_image(photo_bytes: bytes, max_size_kb: int = 512) -> bytes:
     img = Image.open(io.BytesIO(photo_bytes))
     img = img.convert("RGB")
 
-    # Resize if the longest side exceeds 1920 px
     max_dim = 1920
     longest = max(img.size)
     if longest > max_dim:
         scale = max_dim / longest
-        new_w = int(img.width * scale)
-        new_h = int(img.height * scale)
-        img = img.resize((new_w, new_h), Image.LANCZOS)
+        img = img.resize(
+            (int(img.width * scale), int(img.height * scale)),
+            Image.LANCZOS,
+        )
 
     quality = 85
     while quality >= 20:
@@ -436,5 +388,4 @@ def compress_image(photo_bytes: bytes, max_size_kb: int = 512) -> bytes:
             return buf.getvalue()
         quality -= 10
 
-    # Return whatever we have at the lowest quality
     return buf.getvalue()

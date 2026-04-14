@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 
 from bot.services import db_sqlite
-from bot.services.llm import LLMParseError, _parse_json_response, get_llm_client
+from bot.services.llm import _call_and_parse_json
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +69,6 @@ async def analyze_recording(
     one retry.
     """
     analysis_model = os.getenv("PIANO_ANALYSIS_MODEL")
-    client, model = get_llm_client(model_override=analysis_model)
 
     context_parts: list[str] = []
     if piece:
@@ -119,44 +117,17 @@ async def analyze_recording(
     ]
 
     logger.debug(
-        "piano analyze_recording: model=%s piece=%s audio_bytes=%d fmt=%s",
-        model,
+        "piano analyze_recording: piece=%s audio_bytes=%d fmt=%s",
         piece and piece.get("title"),
         len(audio_bytes or b""),
         audio_format,
     )
 
-    response = await client.chat.completions.create(
-        model=model,
+    return await _call_and_parse_json(
+        label="analyze_recording",
         messages=messages,
-        temperature=0.3,
+        model_override=analysis_model,
     )
-    content = (response.choices[0].message.content or "").strip()
-
-    try:
-        return _parse_json_response(content)
-    except json.JSONDecodeError:
-        logger.debug("analyze_recording: first JSON parse failed, retrying")
-
-    messages.append({"role": "assistant", "content": content})
-    messages.append({
-        "role": "user",
-        "content": (
-            "Your previous response was not valid JSON. Return valid JSON only, "
-            "no markdown fences, no explanation."
-        ),
-    })
-    retry = await client.chat.completions.create(
-        model=model, messages=messages, temperature=0.3,
-    )
-    retry_content = (retry.choices[0].message.content or "").strip()
-    try:
-        return _parse_json_response(retry_content)
-    except json.JSONDecodeError as exc:
-        logger.error("analyze_recording: JSON parse failed after retry: %s", retry_content)
-        raise LLMParseError(
-            f"Failed to parse analysis response as JSON: {retry_content}"
-        ) from exc
 
 
 # ---------------------------------------------------------------------------

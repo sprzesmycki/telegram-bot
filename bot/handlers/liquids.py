@@ -1,95 +1,32 @@
+"""/liquid and /pij entry points.
+
+Both commands feed into the same confirmation path as ``/cal``: the analysed
+result is stashed in ``context.user_data["pending_meal"]`` with ``kind="liquid"``
+so ``yes_cmd`` / ``refine_handler`` in ``calories.py`` can take over.
+"""
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 
 from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import CommandHandler, ContextTypes
 
+from bot.handlers._common import handle_llm_error, strip_command
 from bot.handlers.profiles import get_target_profiles
-from bot.services import db_postgres, db_sqlite
 from bot.services.llm import analyze_liquid
-from bot.utils.formatting import (
-    format_liquid_logged,
-    format_liquid_preview,
-    parse_time,
-    strip_command_args,
-)
+from bot.utils.formatting import format_liquid_preview, parse_time, strip_command_args
 
 logger = logging.getLogger(__name__)
 
-
-async def _log_and_reply(
-    update: Update,
-    owner_id: int,
-    profiles: list[dict],
-    drunk_at: datetime,
-    description: str,
-    amount_ml: int,
-    calories: int,
-    protein_g: float,
-    carbs_g: float,
-    fat_g: float,
-    raw_llm: str,
-) -> None:
-    """Log a drink for each profile, mirror to PG, and send a reply."""
-    reply_parts: list[str] = []
-
-    for profile in profiles:
-        profile_id = profile["id"]
-        profile_name = profile["name"]
-
-        liquid_id = await db_sqlite.log_liquid(
-            profile_id=profile_id,
-            owner_id=owner_id,
-            drunk_at=drunk_at,
-            description=description,
-            amount_ml=amount_ml,
-            calories=calories,
-            protein_g=protein_g,
-            carbs_g=carbs_g,
-            fat_g=fat_g,
-            raw_llm=raw_llm,
-        )
-        await db_postgres.mirror_log_liquid(
-            liquid_id=liquid_id,
-            profile_id=profile_id,
-            owner_id=owner_id,
-            drunk_at=drunk_at,
-            description=description,
-            amount_ml=amount_ml,
-            calories=calories,
-            protein_g=protein_g,
-            carbs_g=carbs_g,
-            fat_g=fat_g,
-            raw_llm=raw_llm,
-        )
-
-        totals = await db_sqlite.get_daily_totals(profile_id, owner_id)
-        goal = await db_sqlite.get_goal(profile_id)
-        hydration = await db_sqlite.get_daily_hydration(profile_id, owner_id)
-
-        reply_parts.append(
-            format_liquid_logged(
-                profile_name=profile_name,
-                description=description,
-                amount_ml=amount_ml,
-                cals=calories,
-                protein=protein_g,
-                carbs=carbs_g,
-                fat=fat_g,
-                daily_total=totals,
-                goal=goal,
-                hydration_ml=hydration,
-            )
-        )
-
-    await update.message.reply_text("\n\n".join(reply_parts))
+USAGE = (
+    "Usage: /liquid <description and amount> [@name] [at HH:MM]\n"
+    "Example: /liquid 500ml water\n"
+    "Example: /pij kawa z mlekiem 250ml"
+)
 
 
-async def _send_liquid_preview(update: Update, pending: dict) -> None:
-    """Format and send the current pending_liquid preview."""
+async def _send_preview(update: Update, pending: dict) -> None:
     result = pending["result"]
     await update.message.reply_text(
         format_liquid_preview(
@@ -107,18 +44,11 @@ async def _send_liquid_preview(update: Update, pending: dict) -> None:
 
 async def liquid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     owner_id = update.effective_user.id
-    text = (update.message.text or "")
-    if text.lower().startswith("/liquid"):
-        text = text[7:].strip()
-    elif text.lower().startswith("/pij"):
-        text = text[4:].strip()
+    raw = update.message.text or ""
+    text = strip_command(strip_command(raw, "liquid"), "pij")
 
     if not text:
-        await update.message.reply_text(
-            "Usage: /liquid <description and amount> [@name] [at HH:MM]\n"
-            "Example: /liquid 500ml water\n"
-            "Example: /pij kawa z mlekiem 250ml"
-        )
+        await update.message.reply_text(USAGE)
         return
 
     drunk_at = parse_time(text) or datetime.now()
@@ -132,12 +62,14 @@ async def liquid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         result = await analyze_liquid(description)
     except Exception as exc:
-        # Reusing the error handler logic would be good, but for now just raise or handle simply
-        logger.error("analyze_liquid failed", exc_info=True)
-        await update.message.reply_text(f"Error analyzing liquid: {exc}")
+        msg = handle_llm_error(exc)
+        if msg is None:
+            logger.error("analyze_liquid failed", exc_info=True)
+            msg = f"Error analyzing liquid: {exc}"
+        await update.message.reply_text(msg)
         return
 
-    context.user_data["pending_meal"] = {
+    pending = {
         "kind": "liquid",
         "owner_id": owner_id,
         "description": description,
@@ -145,8 +77,13 @@ async def liquid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "profiles": profiles,
         "result": result,
     }
+    context.user_data["pending_meal"] = pending
+    await _send_preview(update, pending)
 
-    await _send_liquid_preview(update, context.user_data["pending_meal"])
+
+COMMANDS: list[tuple[str, str]] = [
+    ("liquid", "Log a drink (amount and type)"),
+]
 
 
 def register(app) -> None:
