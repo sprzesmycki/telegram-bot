@@ -4,7 +4,7 @@ import base64
 import logging
 import os
 
-from bot.services import db_sqlite
+from bot.services import db
 from bot.services.llm import _call_and_parse_json
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,7 @@ async def analyze_recording(
         context_parts.append(f"Piece: {piece['title']}{composer} (status: {status}).")
         if piece.get("notes"):
             context_parts.append(f"Piece notes: {piece['notes']}.")
-        prior = await db_sqlite.list_piano_recordings(
+        prior = await db.list_piano_recordings(
             owner_id, piece_id=piece["id"], limit=3,
         )
         if prior:

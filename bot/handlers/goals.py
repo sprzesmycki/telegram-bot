@@ -5,7 +5,7 @@ import logging
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
-from bot.services import db_sqlite, db_postgres
+from bot.services import db
 from bot.utils.formatting import parse_target
 
 logger = logging.getLogger(__name__)
@@ -40,15 +40,14 @@ async def goal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     profile_name, _is_both = parse_target(text)
 
     if profile_name is not None:
-        profile = await db_sqlite.get_profile_by_name(owner_id, profile_name)
+        profile = await db.get_profile_by_name(owner_id, profile_name)
         if profile is None:
             await update.message.reply_text(f"Profile '{profile_name}' not found.")
             return
     else:
-        profile = await db_sqlite.ensure_default_profile(owner_id)
+        profile = await db.ensure_default_profile(owner_id)
 
-    await db_sqlite.set_goal(profile["id"], kcal, protein_g=None, carbs_g=None, fat_g=None)
-    await db_postgres.mirror_set_goal(profile["id"], kcal, protein_g=None, carbs_g=None, fat_g=None)
+    await db.set_goal(profile["id"], kcal, protein_g=None, carbs_g=None, fat_g=None)
     await update.message.reply_text(
         f"Goal set to {kcal} kcal/day for {profile['name']} (macros reset)"
     )

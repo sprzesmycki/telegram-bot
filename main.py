@@ -6,8 +6,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load env before any other project imports
-load_dotenv(Path.home() / ".config" / "telegrambot" / ".env")
+# Load env before any other project imports. Historical path for host runs,
+# plus CWD (the compose container sets env via env_file so both no-op there).
+load_dotenv(Path.home() / ".config" / "telegrambot" / ".env", override=False)
+load_dotenv(override=False)
 
 from telegram import BotCommand
 from telegram.ext import Application, MessageHandler, filters
@@ -23,7 +25,7 @@ from bot.handlers import (
     summary,
     supplements,
 )
-from bot.services import db_postgres, db_sqlite
+from bot.services import db
 from bot.services.llm import init_llm
 from bot.services.scheduler import (
     init_scheduler,
@@ -84,8 +86,7 @@ def _collect_bot_commands() -> list[BotCommand]:
 
 async def post_init(app: Application) -> None:
     """Run once after the Application has been initialised."""
-    await db_sqlite.init_db()
-    await db_postgres.init_pg()
+    await db.init_db()
     init_llm()
 
     await app.bot.set_my_commands(_collect_bot_commands())
@@ -108,8 +109,7 @@ async def post_shutdown(app: Application) -> None:
     if scheduler:
         shutdown(scheduler)
 
-    await db_sqlite.close_db()
-    await db_postgres.close_pg()
+    await db.close_db()
     logger.info("Bot shut down")
 
 

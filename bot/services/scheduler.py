@@ -148,28 +148,14 @@ def register_daily_summary(scheduler: AsyncIOScheduler, bot) -> None:
 
     async def _send_summaries() -> None:
         from bot.handlers.summary import send_daily_summary
-        from bot.services import db_sqlite
+        from bot.services import db
 
-        # Get all distinct owners with active profiles
-        profiles = await db_sqlite.get_all_active_supplements()
-        seen_owners: set[int] = set()
-        for sup in profiles:
-            seen_owners.add(sup["owner_user_id"])
-
-        # Also check for owners with profiles but no supplements
-        # We iterate all known owners by checking profiles table
-        # For simplicity, just use the owners we already have from supplements
-        # plus any owner with an active profile
-        db = db_sqlite.get_db()
-        cursor = await db.execute(
-            "SELECT DISTINCT owner_user_id FROM profiles WHERE active = 1"
-        )
-        rows = await cursor.fetchall()
-        for row in rows:
-            seen_owners.add(row[0] if isinstance(row, tuple) else row["owner_user_id"])
+        supplements = await db.get_all_active_supplements()
+        seen_owners: set[int] = {sup["owner_user_id"] for sup in supplements}
+        seen_owners.update(await db.get_distinct_profile_owner_ids())
 
         for owner_id in seen_owners:
-            owner_profiles = await db_sqlite.list_profiles(owner_id)
+            owner_profiles = await db.list_profiles(owner_id)
             for profile in owner_profiles:
                 try:
                     await send_daily_summary(bot, owner_id, profile)
@@ -205,20 +191,12 @@ def register_daily_review(scheduler: AsyncIOScheduler, bot) -> None:
 
     async def _send_reviews() -> None:
         from bot.handlers.review import send_daily_review
-        from bot.services import db_sqlite
+        from bot.services import db
 
-        db = db_sqlite.get_db()
-        cursor = await db.execute(
-            "SELECT DISTINCT owner_user_id FROM profiles WHERE active = 1"
-        )
-        rows = await cursor.fetchall()
-        owner_ids = {
-            int(row[0] if isinstance(row, tuple) else row["owner_user_id"])
-            for row in rows
-        }
+        owner_ids = await db.get_distinct_profile_owner_ids()
 
         for owner_id in owner_ids:
-            owner_profiles = await db_sqlite.list_profiles(owner_id)
+            owner_profiles = await db.list_profiles(owner_id)
             for profile in owner_profiles:
                 try:
                     await send_daily_review(bot, owner_id, profile)
@@ -253,21 +231,14 @@ def register_piano_checkin(scheduler: AsyncIOScheduler, bot) -> None:
     hour, minute = int(parts[0]), int(parts[1])
 
     async def _send_checkins() -> None:
-        from bot.services import db_sqlite
+        from bot.services import db
 
-        owner_ids = await db_sqlite.get_piano_owners()
+        owner_ids = set(await db.get_piano_owners())
+        owner_ids.update(await db.get_distinct_profile_owner_ids())
 
-        db = db_sqlite.get_db()
-        cursor = await db.execute(
-            "SELECT DISTINCT owner_user_id FROM profiles WHERE active = 1"
-        )
-        rows = await cursor.fetchall()
-        for row in rows:
-            owner_ids.append(int(row[0] if isinstance(row, tuple) else row["owner_user_id"]))
-
-        for owner_id in set(owner_ids):
+        for owner_id in owner_ids:
             try:
-                session = await db_sqlite.get_piano_session_today(owner_id)
+                session = await db.get_piano_session_today(owner_id)
                 if session is not None:
                     continue
                 await bot.send_message(
@@ -298,9 +269,9 @@ def register_piano_checkin(scheduler: AsyncIOScheduler, bot) -> None:
 
 async def load_all_reminders(scheduler: AsyncIOScheduler, bot) -> None:
     """Load all active supplements from DB and register reminder jobs."""
-    from bot.services import db_sqlite
+    from bot.services import db
 
-    supplements = await db_sqlite.get_all_active_supplements()
+    supplements = await db.get_all_active_supplements()
     for sup in supplements:
         register_supplement_reminder(scheduler, bot, sup)
     logger.info("Loaded %d supplement reminders from DB", len(supplements))

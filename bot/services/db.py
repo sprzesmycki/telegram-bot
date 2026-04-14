@@ -1,0 +1,832 @@
+"""PostgreSQL data access layer.
+
+Single source of truth. The connection pool pins session timezone to
+Europe/Warsaw so ``CURRENT_DATE`` and ``column::date`` use the operator's
+local calendar day -- the same semantics the original SQLite queries had via
+``date('now', 'localtime')``. Schema is owned by Alembic; this module only
+executes queries.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+import asyncpg
+
+logger = logging.getLogger(__name__)
+
+WARSAW = ZoneInfo("Europe/Warsaw")
+
+_pool: asyncpg.Pool | None = None
+
+
+# ---------------------------------------------------------------------------
+# Connection management
+# ---------------------------------------------------------------------------
+
+
+async def init_db() -> None:
+    global _pool
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL must be set")
+
+    _pool = await asyncpg.create_pool(
+        database_url,
+        min_size=1,
+        max_size=10,
+        server_settings={"timezone": "Europe/Warsaw"},
+    )
+    logger.info("Postgres pool ready (timezone=Europe/Warsaw)")
+
+
+async def close_db() -> None:
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None
+
+
+def _pool_or_raise() -> asyncpg.Pool:
+    if _pool is None:
+        raise RuntimeError("Database not initialised -- call init_db() first")
+    return _pool
+
+
+# ---------------------------------------------------------------------------
+# Input coercion helpers
+# ---------------------------------------------------------------------------
+
+
+def _to_dt(value: str | date | datetime | None) -> datetime | None:
+    """Coerce a date-ish input to a timezone-aware datetime.
+
+    Naive inputs are assumed to be Europe/Warsaw local time.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=WARSAW)
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=WARSAW)
+    if isinstance(value, str):
+        s = value.replace(" ", "T")
+        # Accept both full ISO datetimes and bare dates.
+        if "T" in s:
+            dt = datetime.fromisoformat(s)
+        else:
+            dt = datetime.fromisoformat(s[:10] + "T00:00:00")
+        return dt if dt.tzinfo else dt.replace(tzinfo=WARSAW)
+    raise TypeError(f"Cannot coerce {type(value).__name__} to datetime")
+
+
+def _load_pieces_json(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+# ---------------------------------------------------------------------------
+# Profiles
+# ---------------------------------------------------------------------------
+
+
+async def create_profile(owner_id: int, name: str) -> int:
+    pool = _pool_or_raise()
+    return await pool.fetchval(
+        "INSERT INTO profiles (owner_user_id, name) VALUES ($1, $2) RETURNING id",
+        owner_id, name,
+    )
+
+
+async def update_profile(
+    profile_id: int,
+    owner_id: int,
+    height_cm: float | None = None,
+    weight_kg: float | None = None,
+    age: int | None = None,
+    gender: str | None = None,
+    activity_level: str | None = None,
+) -> None:
+    fields = [
+        ("height_cm", height_cm),
+        ("weight_kg", weight_kg),
+        ("age", age),
+        ("gender", gender),
+        ("activity_level", activity_level),
+    ]
+    updates: list[str] = []
+    params: list[object] = []
+    for col, val in fields:
+        if val is None:
+            continue
+        params.append(val)
+        updates.append(f"{col} = ${len(params)}")
+
+    if not updates:
+        return
+
+    params.extend([profile_id, owner_id])
+    sql = (
+        f"UPDATE profiles SET {', '.join(updates)} "
+        f"WHERE id = ${len(params) - 1} AND owner_user_id = ${len(params)}"
+    )
+    await _pool_or_raise().execute(sql, *params)
+
+
+async def list_profiles(owner_id: int) -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        "SELECT * FROM profiles WHERE owner_user_id = $1 AND active = TRUE ORDER BY id",
+        owner_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_active_profile(owner_id: int) -> dict | None:
+    row = await _pool_or_raise().fetchrow(
+        """
+        SELECT p.*
+        FROM active_profile ap
+        JOIN profiles p ON p.id = ap.profile_id
+        WHERE ap.user_id = $1 AND p.active = TRUE
+        """,
+        owner_id,
+    )
+    return dict(row) if row else None
+
+
+async def set_active_profile(owner_id: int, profile_id: int) -> None:
+    await _pool_or_raise().execute(
+        """
+        INSERT INTO active_profile (user_id, profile_id) VALUES ($1, $2)
+        ON CONFLICT (user_id) DO UPDATE SET profile_id = EXCLUDED.profile_id
+        """,
+        owner_id, profile_id,
+    )
+
+
+async def delete_profile(owner_id: int, name: str) -> bool:
+    row = await _pool_or_raise().fetchrow(
+        "UPDATE profiles SET active = FALSE "
+        "WHERE owner_user_id = $1 AND name = $2 AND active = TRUE RETURNING id",
+        owner_id, name,
+    )
+    return row is not None
+
+
+async def get_profile_by_name(owner_id: int, name: str) -> dict | None:
+    row = await _pool_or_raise().fetchrow(
+        "SELECT * FROM profiles WHERE owner_user_id = $1 AND name = $2 AND active = TRUE",
+        owner_id, name,
+    )
+    return dict(row) if row else None
+
+
+async def ensure_default_profile(owner_id: int) -> dict:
+    profiles = await list_profiles(owner_id)
+    if not profiles:
+        profile_id = await create_profile(owner_id, "Me")
+        await set_active_profile(owner_id, profile_id)
+
+    active = await get_active_profile(owner_id)
+    if active is None:
+        profiles = await list_profiles(owner_id)
+        await set_active_profile(owner_id, profiles[0]["id"])
+        active = await get_active_profile(owner_id)
+    return active
+
+
+async def get_all_profiles(owner_id: int) -> list[dict]:
+    return await list_profiles(owner_id)
+
+
+async def get_distinct_profile_owner_ids() -> list[int]:
+    rows = await _pool_or_raise().fetch(
+        "SELECT DISTINCT owner_user_id FROM profiles WHERE active = TRUE"
+    )
+    return [int(r["owner_user_id"]) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Meals
+# ---------------------------------------------------------------------------
+
+
+async def log_meal(
+    profile_id: int,
+    owner_id: int,
+    eaten_at: datetime,
+    description: str,
+    calories: int,
+    protein_g: float,
+    carbs_g: float,
+    fat_g: float,
+    raw_llm: str,
+    photo_path: str | None = None,
+) -> int:
+    return await _pool_or_raise().fetchval(
+        """
+        INSERT INTO meals
+            (profile_id, owner_user_id, eaten_at, description,
+             calories, protein_g, carbs_g, fat_g, raw_llm_response, photo_path)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING id
+        """,
+        profile_id, owner_id, _to_dt(eaten_at), description,
+        calories, protein_g, carbs_g, fat_g, raw_llm, photo_path,
+    )
+
+
+async def get_meals_today(profile_id: int, owner_id: int) -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM meals
+        WHERE eaten_at::date = CURRENT_DATE
+          AND profile_id = $1
+          AND owner_user_id = $2
+        ORDER BY eaten_at
+        """,
+        profile_id, owner_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_meals_range(
+    profile_id: int, owner_id: int,
+    start: str | date | datetime,
+    end: str | date | datetime,
+) -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM meals
+        WHERE eaten_at >= $1 AND eaten_at < $2
+          AND profile_id = $3
+          AND owner_user_id = $4
+        ORDER BY eaten_at
+        """,
+        _to_dt(start), _to_dt(end), profile_id, owner_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def delete_meal(meal_id: int, owner_id: int) -> bool:
+    row = await _pool_or_raise().fetchrow(
+        "DELETE FROM meals WHERE id = $1 AND owner_user_id = $2 RETURNING id",
+        meal_id, owner_id,
+    )
+    return row is not None
+
+
+async def get_meal_by_id(meal_id: int, owner_id: int) -> dict | None:
+    row = await _pool_or_raise().fetchrow(
+        "SELECT * FROM meals WHERE id = $1 AND owner_user_id = $2",
+        meal_id, owner_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_daily_totals(profile_id: int, owner_id: int) -> dict:
+    row = await _pool_or_raise().fetchrow(
+        """
+        WITH daily_meals AS (
+            SELECT
+                COALESCE(SUM(calories), 0)::INTEGER AS calories,
+                COALESCE(SUM(protein_g), 0)::REAL  AS protein_g,
+                COALESCE(SUM(carbs_g), 0)::REAL    AS carbs_g,
+                COALESCE(SUM(fat_g), 0)::REAL      AS fat_g
+            FROM meals
+            WHERE eaten_at::date = CURRENT_DATE
+              AND profile_id = $1
+              AND owner_user_id = $2
+        ),
+        daily_liquids AS (
+            SELECT
+                COALESCE(SUM(calories), 0)::INTEGER AS calories,
+                COALESCE(SUM(protein_g), 0)::REAL  AS protein_g,
+                COALESCE(SUM(carbs_g), 0)::REAL    AS carbs_g,
+                COALESCE(SUM(fat_g), 0)::REAL      AS fat_g
+            FROM liquids
+            WHERE drunk_at::date = CURRENT_DATE
+              AND profile_id = $1
+              AND owner_user_id = $2
+        )
+        SELECT
+            m.calories  + l.calories  AS calories,
+            m.protein_g + l.protein_g AS protein_g,
+            m.carbs_g   + l.carbs_g   AS carbs_g,
+            m.fat_g     + l.fat_g     AS fat_g
+        FROM daily_meals m, daily_liquids l
+        """,
+        profile_id, owner_id,
+    )
+    return dict(row)
+
+
+# ---------------------------------------------------------------------------
+# Liquids
+# ---------------------------------------------------------------------------
+
+
+async def log_liquid(
+    profile_id: int,
+    owner_id: int,
+    drunk_at: datetime,
+    description: str,
+    amount_ml: int,
+    calories: int,
+    protein_g: float,
+    carbs_g: float,
+    fat_g: float,
+    raw_llm: str,
+) -> int:
+    return await _pool_or_raise().fetchval(
+        """
+        INSERT INTO liquids
+            (profile_id, owner_user_id, drunk_at, description,
+             amount_ml, calories, protein_g, carbs_g, fat_g, raw_llm_response)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING id
+        """,
+        profile_id, owner_id, _to_dt(drunk_at), description,
+        amount_ml, calories, protein_g, carbs_g, fat_g, raw_llm,
+    )
+
+
+async def get_liquids_today(profile_id: int, owner_id: int) -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM liquids
+        WHERE drunk_at::date = CURRENT_DATE
+          AND profile_id = $1
+          AND owner_user_id = $2
+        ORDER BY drunk_at
+        """,
+        profile_id, owner_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_liquids_range(
+    profile_id: int, owner_id: int,
+    start: str | date | datetime,
+    end: str | date | datetime,
+) -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM liquids
+        WHERE drunk_at >= $1 AND drunk_at < $2
+          AND profile_id = $3
+          AND owner_user_id = $4
+        ORDER BY drunk_at
+        """,
+        _to_dt(start), _to_dt(end), profile_id, owner_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def delete_liquid(liquid_id: int, owner_id: int) -> bool:
+    row = await _pool_or_raise().fetchrow(
+        "DELETE FROM liquids WHERE id = $1 AND owner_user_id = $2 RETURNING id",
+        liquid_id, owner_id,
+    )
+    return row is not None
+
+
+async def get_liquid_by_id(liquid_id: int, owner_id: int) -> dict | None:
+    row = await _pool_or_raise().fetchrow(
+        "SELECT * FROM liquids WHERE id = $1 AND owner_user_id = $2",
+        liquid_id, owner_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_daily_hydration(profile_id: int, owner_id: int) -> int:
+    val = await _pool_or_raise().fetchval(
+        """
+        SELECT COALESCE(SUM(amount_ml), 0)::INTEGER
+        FROM liquids
+        WHERE drunk_at::date = CURRENT_DATE
+          AND profile_id = $1
+          AND owner_user_id = $2
+        """,
+        profile_id, owner_id,
+    )
+    return val or 0
+
+
+# ---------------------------------------------------------------------------
+# Goals
+# ---------------------------------------------------------------------------
+
+
+async def set_goal(
+    profile_id: int,
+    daily_calories: int,
+    protein_g: float | None = None,
+    carbs_g: float | None = None,
+    fat_g: float | None = None,
+) -> None:
+    await _pool_or_raise().execute(
+        """
+        INSERT INTO goals (profile_id, daily_calories, daily_protein_g, daily_carbs_g, daily_fat_g)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT(profile_id) DO UPDATE SET
+            daily_calories  = EXCLUDED.daily_calories,
+            daily_protein_g = EXCLUDED.daily_protein_g,
+            daily_carbs_g   = EXCLUDED.daily_carbs_g,
+            daily_fat_g     = EXCLUDED.daily_fat_g
+        """,
+        profile_id, daily_calories, protein_g, carbs_g, fat_g,
+    )
+
+
+async def get_goal(profile_id: int) -> dict:
+    row = await _pool_or_raise().fetchrow(
+        "SELECT * FROM goals WHERE profile_id = $1",
+        profile_id,
+    )
+    if row:
+        return dict(row)
+    return {
+        "daily_calories": 2000,
+        "daily_protein_g": None,
+        "daily_carbs_g": None,
+        "daily_fat_g": None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Supplements
+# ---------------------------------------------------------------------------
+
+
+async def add_supplement(
+    profile_id: int, owner_id: int, name: str, reminder_time: str, dose: str | None = None,
+) -> int:
+    return await _pool_or_raise().fetchval(
+        """
+        INSERT INTO supplements (profile_id, owner_user_id, name, reminder_time, dose)
+        VALUES ($1, $2, $3, $4, $5) RETURNING id
+        """,
+        profile_id, owner_id, name, reminder_time, dose,
+    )
+
+
+async def list_supplements(profile_id: int, owner_id: int) -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        "SELECT * FROM supplements WHERE profile_id = $1 AND owner_user_id = $2 AND active = TRUE",
+        profile_id, owner_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_all_active_supplements() -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT s.*, p.name AS profile_name
+        FROM supplements s
+        JOIN profiles p ON p.id = s.profile_id
+        WHERE s.active = TRUE
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+async def remove_supplement(profile_id: int, owner_id: int, name: str) -> bool:
+    row = await _pool_or_raise().fetchrow(
+        """
+        UPDATE supplements SET active = FALSE
+        WHERE profile_id = $1 AND owner_user_id = $2 AND name = $3 AND active = TRUE
+        RETURNING id
+        """,
+        profile_id, owner_id, name,
+    )
+    return row is not None
+
+
+async def log_supplement_taken(supplement_id: int, profile_id: int) -> None:
+    await _pool_or_raise().execute(
+        "INSERT INTO supplement_logs (supplement_id, profile_id) VALUES ($1, $2)",
+        supplement_id, profile_id,
+    )
+
+
+async def get_supplement_logs_today(profile_id: int) -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM supplement_logs
+        WHERE taken_at::date = CURRENT_DATE
+          AND profile_id = $1
+        """,
+        profile_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_supplement_by_id(supplement_id: int) -> dict | None:
+    row = await _pool_or_raise().fetchrow(
+        """
+        SELECT s.*, p.name AS profile_name
+        FROM supplements s
+        JOIN profiles p ON p.id = s.profile_id
+        WHERE s.id = $1
+        """,
+        supplement_id,
+    )
+    return dict(row) if row else None
+
+
+async def get_supplement_by_name(profile_id: int, owner_id: int, name: str) -> dict | None:
+    row = await _pool_or_raise().fetchrow(
+        """
+        SELECT * FROM supplements
+        WHERE profile_id = $1 AND owner_user_id = $2 AND name = $3 AND active = TRUE
+        """,
+        profile_id, owner_id, name,
+    )
+    return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Piano: sessions
+# ---------------------------------------------------------------------------
+
+
+async def log_piano_session(
+    owner_id: int,
+    practiced_at: date,
+    duration_minutes: int | None,
+    notes: str | None,
+    pieces_practiced: list[str],
+) -> int:
+    return await _pool_or_raise().fetchval(
+        """
+        INSERT INTO piano_sessions
+            (owner_user_id, practiced_at, duration_minutes, notes, pieces_practiced)
+        VALUES ($1, $2, $3, $4, $5) RETURNING id
+        """,
+        owner_id, practiced_at, duration_minutes, notes,
+        json.dumps(pieces_practiced or []),
+    )
+
+
+def _session_row_to_dict(row: asyncpg.Record) -> dict:
+    data = dict(row)
+    data["pieces_practiced"] = _load_pieces_json(data.get("pieces_practiced"))
+    return data
+
+
+async def list_piano_sessions(owner_id: int, limit: int = 7) -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM piano_sessions
+        WHERE owner_user_id = $1
+        ORDER BY practiced_at DESC, logged_at DESC
+        LIMIT $2
+        """,
+        owner_id, limit,
+    )
+    return [_session_row_to_dict(r) for r in rows]
+
+
+async def get_piano_session_today(owner_id: int) -> dict | None:
+    row = await _pool_or_raise().fetchrow(
+        """
+        SELECT * FROM piano_sessions
+        WHERE owner_user_id = $1
+          AND practiced_at = CURRENT_DATE
+        ORDER BY logged_at DESC
+        LIMIT 1
+        """,
+        owner_id,
+    )
+    return _session_row_to_dict(row) if row else None
+
+
+async def piano_total_stats(owner_id: int) -> dict:
+    row = await _pool_or_raise().fetchrow(
+        """
+        SELECT
+            COUNT(*)::INTEGER AS total_sessions,
+            COALESCE(SUM(duration_minutes), 0)::INTEGER AS total_minutes
+        FROM piano_sessions
+        WHERE owner_user_id = $1
+        """,
+        owner_id,
+    )
+    return dict(row) if row else {"total_sessions": 0, "total_minutes": 0}
+
+
+async def get_piano_owners() -> list[int]:
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT DISTINCT owner_user_id FROM piano_sessions
+        UNION
+        SELECT DISTINCT owner_user_id FROM piano_pieces
+        """
+    )
+    return [int(r["owner_user_id"]) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Piano: pieces
+# ---------------------------------------------------------------------------
+
+
+async def add_piano_piece(owner_id: int, title: str, composer: str | None = None) -> int:
+    return await _pool_or_raise().fetchval(
+        """
+        INSERT INTO piano_pieces (owner_user_id, title, composer)
+        VALUES ($1, $2, $3) RETURNING id
+        """,
+        owner_id, title, composer,
+    )
+
+
+async def remove_piano_piece(owner_id: int, piece_id: int) -> bool:
+    row = await _pool_or_raise().fetchrow(
+        "DELETE FROM piano_pieces WHERE id = $1 AND owner_user_id = $2 RETURNING id",
+        piece_id, owner_id,
+    )
+    return row is not None
+
+
+async def list_piano_pieces(owner_id: int, status: str | None = None) -> list[dict]:
+    pool = _pool_or_raise()
+    if status is None:
+        rows = await pool.fetch(
+            "SELECT * FROM piano_pieces WHERE owner_user_id = $1 ORDER BY status, title",
+            owner_id,
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT * FROM piano_pieces WHERE owner_user_id = $1 AND status = $2 ORDER BY title",
+            owner_id, status,
+        )
+    return [dict(r) for r in rows]
+
+
+async def find_piano_piece_by_title(owner_id: int, title: str) -> dict | None:
+    pool = _pool_or_raise()
+    row = await pool.fetchrow(
+        """
+        SELECT * FROM piano_pieces
+        WHERE owner_user_id = $1 AND LOWER(title) = LOWER($2)
+        LIMIT 1
+        """,
+        owner_id, title,
+    )
+    if row:
+        return dict(row)
+    row = await pool.fetchrow(
+        """
+        SELECT * FROM piano_pieces
+        WHERE owner_user_id = $1 AND LOWER(title) LIKE LOWER($2)
+        ORDER BY LENGTH(title)
+        LIMIT 1
+        """,
+        owner_id, f"%{title}%",
+    )
+    return dict(row) if row else None
+
+
+async def update_piano_piece_status(owner_id: int, piece_id: int, status: str) -> bool:
+    row = await _pool_or_raise().fetchrow(
+        "UPDATE piano_pieces SET status = $1 WHERE id = $2 AND owner_user_id = $3 RETURNING id",
+        status, piece_id, owner_id,
+    )
+    return row is not None
+
+
+async def update_piano_piece_note(owner_id: int, piece_id: int, notes: str) -> bool:
+    row = await _pool_or_raise().fetchrow(
+        "UPDATE piano_pieces SET notes = $1 WHERE id = $2 AND owner_user_id = $3 RETURNING id",
+        notes, piece_id, owner_id,
+    )
+    return row is not None
+
+
+async def touch_piano_piece_last_practiced(
+    owner_id: int, piece_id: int, practiced_at: date,
+) -> None:
+    await _pool_or_raise().execute(
+        "UPDATE piano_pieces SET last_practiced_at = $1 WHERE id = $2 AND owner_user_id = $3",
+        practiced_at, piece_id, owner_id,
+    )
+
+
+async def most_practiced_piece(owner_id: int) -> dict | None:
+    sessions = await list_piano_sessions(owner_id, limit=1000)
+    if not sessions:
+        return None
+
+    counts: dict[str, int] = {}
+    for session in sessions:
+        for name in session["pieces_practiced"] or []:
+            key = name.strip()
+            if not key:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+
+    if not counts:
+        return None
+
+    top_title, top_count = max(counts.items(), key=lambda kv: kv[1])
+    piece = await find_piano_piece_by_title(owner_id, top_title)
+    return {
+        "title": (piece["title"] if piece else top_title),
+        "composer": piece["composer"] if piece else None,
+        "count": top_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Piano: streak
+# ---------------------------------------------------------------------------
+
+
+async def get_piano_streak(owner_id: int) -> dict:
+    row = await _pool_or_raise().fetchrow(
+        "SELECT * FROM piano_streak WHERE owner_user_id = $1",
+        owner_id,
+    )
+    if row:
+        return dict(row)
+    return {
+        "owner_user_id": owner_id,
+        "current_streak": 0,
+        "longest_streak": 0,
+        "last_practiced_date": None,
+    }
+
+
+async def upsert_piano_streak(
+    owner_id: int,
+    current_streak: int,
+    longest_streak: int,
+    last_practiced_date: date | None,
+) -> None:
+    await _pool_or_raise().execute(
+        """
+        INSERT INTO piano_streak
+            (owner_user_id, current_streak, longest_streak, last_practiced_date)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT(owner_user_id) DO UPDATE SET
+            current_streak      = EXCLUDED.current_streak,
+            longest_streak      = EXCLUDED.longest_streak,
+            last_practiced_date = EXCLUDED.last_practiced_date
+        """,
+        owner_id, current_streak, longest_streak, last_practiced_date,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Piano: recordings
+# ---------------------------------------------------------------------------
+
+
+async def add_piano_recording(
+    owner_id: int,
+    piece_id: int | None,
+    file_path: str | None,
+    duration_seconds: int | None,
+    feedback_summary: str | None,
+    raw_analysis: str | None,
+) -> int:
+    return await _pool_or_raise().fetchval(
+        """
+        INSERT INTO piano_recordings
+            (owner_user_id, piece_id, file_path, duration_seconds,
+             feedback_summary, raw_analysis)
+        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+        """,
+        owner_id, piece_id, file_path, duration_seconds, feedback_summary, raw_analysis,
+    )
+
+
+async def list_piano_recordings(
+    owner_id: int, piece_id: int | None = None, limit: int = 10,
+) -> list[dict]:
+    pool = _pool_or_raise()
+    if piece_id is None:
+        rows = await pool.fetch(
+            "SELECT * FROM piano_recordings WHERE owner_user_id = $1 ORDER BY recorded_at DESC LIMIT $2",
+            owner_id, limit,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT * FROM piano_recordings
+            WHERE owner_user_id = $1 AND piece_id = $2
+            ORDER BY recorded_at DESC LIMIT $3
+            """,
+            owner_id, piece_id, limit,
+        )
+    return [dict(r) for r in rows]

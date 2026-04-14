@@ -1,0 +1,16 @@
+Alembic migrations for the calorie-bot Postgres schema.
+
+Commands (run from repo root):
+
+  uv run alembic upgrade head              # apply all pending migrations
+  uv run alembic revision -m "add foo"     # create a new empty migration
+  uv run alembic downgrade -1              # roll back one revision
+  uv run alembic current                   # show current DB revision
+
+The DATABASE_URL env var overrides alembic.ini's sqlalchemy.url. Inside
+docker compose, the `migrate` service runs `alembic upgrade head` once on
+startup before the app service boots.
+
+Migrations are written as raw SQL via op.execute(...) -- we do not use
+SQLAlchemy models. Keep the SQL idempotent-friendly where practical
+(CREATE INDEX IF NOT EXISTS, etc.).

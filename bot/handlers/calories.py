@@ -19,7 +19,7 @@ from telegram.ext import (
 
 from bot.handlers._common import fmt_hhmm, handle_llm_error, short_text, strip_command
 from bot.handlers.profiles import get_target_profiles
-from bot.services import db_sqlite, entries
+from bot.services import db
 from bot.services.llm import (
     analyze_liquid,
     analyze_meal,
@@ -115,7 +115,7 @@ async def _log_meal_for_profiles(
 ) -> None:
     reply_parts: list[str] = []
     for profile in profiles:
-        await entries.record_meal(
+        await db.log_meal(
             profile_id=profile["id"],
             owner_id=owner_id,
             eaten_at=eaten_at,
@@ -127,8 +127,8 @@ async def _log_meal_for_profiles(
             raw_llm=raw_llm,
             photo_path=photo_path,
         )
-        totals = await db_sqlite.get_daily_totals(profile["id"], owner_id)
-        goal = await db_sqlite.get_goal(profile["id"])
+        totals = await db.get_daily_totals(profile["id"], owner_id)
+        goal = await db.get_goal(profile["id"])
         reply_parts.append(
             format_meal_logged(
                 profile_name=profile["name"],
@@ -156,7 +156,7 @@ async def _log_liquid_for_profiles(
 ) -> None:
     reply_parts: list[str] = []
     for profile in profiles:
-        await entries.record_liquid(
+        await db.log_liquid(
             profile_id=profile["id"],
             owner_id=owner_id,
             drunk_at=drunk_at,
@@ -168,9 +168,9 @@ async def _log_liquid_for_profiles(
             fat_g=nutrition["fat_g"],
             raw_llm=raw_llm,
         )
-        totals = await db_sqlite.get_daily_totals(profile["id"], owner_id)
-        goal = await db_sqlite.get_goal(profile["id"])
-        hydration = await db_sqlite.get_daily_hydration(profile["id"], owner_id)
+        totals = await db.get_daily_totals(profile["id"], owner_id)
+        goal = await db.get_goal(profile["id"])
+        hydration = await db.get_daily_hydration(profile["id"], owner_id)
         reply_parts.append(
             format_liquid_logged(
                 profile_name=profile["name"],
@@ -448,8 +448,8 @@ async def _build_today_view(
     profile: dict, owner_id: int,
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """Build the text + inline keyboard for one profile's /today list."""
-    meals = await db_sqlite.get_meals_today(profile["id"], owner_id)
-    liquids = await db_sqlite.get_liquids_today(profile["id"], owner_id)
+    meals = await db.get_meals_today(profile["id"], owner_id)
+    liquids = await db.get_liquids_today(profile["id"], owner_id)
 
     if not meals and not liquids:
         return (f"[{profile['name']}] No entries logged today.", None)
@@ -474,7 +474,7 @@ async def _build_today_view(
         ))
     entries_rows.sort(key=lambda e: e[0])
 
-    totals = await db_sqlite.get_daily_totals(profile["id"], owner_id)
+    totals = await db.get_daily_totals(profile["id"], owner_id)
 
     lines = [f"[{profile['name']}] Today"]
     buttons: list[InlineKeyboardButton] = []
@@ -526,11 +526,11 @@ async def today_delete_callback(
         return
 
     if action == "delm":
-        row = await db_sqlite.get_meal_by_id(entry_id, owner_id)
-        delete = entries.delete_meal
+        row = await db.get_meal_by_id(entry_id, owner_id)
+        delete = db.delete_meal
     elif action == "dell":
-        row = await db_sqlite.get_liquid_by_id(entry_id, owner_id)
-        delete = entries.delete_liquid
+        row = await db.get_liquid_by_id(entry_id, owner_id)
+        delete = db.delete_liquid
     else:
         return
 
@@ -543,7 +543,7 @@ async def today_delete_callback(
 
     # Re-render the list for the profile that owned the row.
     profile = next(
-        (p for p in await db_sqlite.list_profiles(owner_id) if p["id"] == row["profile_id"]),
+        (p for p in await db.list_profiles(owner_id) if p["id"] == row["profile_id"]),
         {"id": row["profile_id"], "name": ""},
     )
     body, keyboard = await _build_today_view(profile, owner_id)
