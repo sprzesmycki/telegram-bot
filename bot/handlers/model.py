@@ -50,5 +50,10 @@ async def model_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 
 
+COMMANDS: list[tuple[str, str]] = [
+    ("model", "View or switch LLM provider/model"),
+]
+
+
 def register(app) -> None:
     app.add_handler(CommandHandler("model", model_cmd))

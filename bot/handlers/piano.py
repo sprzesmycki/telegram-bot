@@ -669,6 +669,11 @@ async def piano_text_dispatch(
 # ---------------------------------------------------------------------------
 
 
+COMMANDS: list[tuple[str, str]] = [
+    ("piano", "Piano practice coach (log/checkin/analyze)"),
+]
+
+
 def register(app) -> None:
     app.add_handler(CommandHandler("piano", piano_cmd))
     app.add_handler(

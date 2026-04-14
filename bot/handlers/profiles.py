@@ -243,9 +243,25 @@ async def get_target_profiles(owner_id: int, text: str) -> list[dict]:
     return [active]
 
 
+async def resolve_single_profile(owner_id: int, text: str) -> dict | None:
+    """Resolve a single target profile, or ``None`` if the name was unknown.
+
+    Convenience wrapper for handlers that don't support ``@both`` — they just
+    want the first (and only) profile the user asked for.
+    """
+    profiles = await get_target_profiles(owner_id, text)
+    return profiles[0] if profiles else None
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
+
+
+COMMANDS: list[tuple[str, str]] = [
+    ("profile", "Manage profiles (add/list/switch/delete/set)"),
+    ("stats", "Show BMR, TDEE and macro targets"),
+]
 
 
 def register(app) -> None:

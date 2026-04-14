@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv(Path.home() / ".config" / "telegrambot" / ".env")
 
 from telegram import BotCommand
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, MessageHandler, filters
 
 from bot.handlers import (
     calories,
@@ -37,17 +37,24 @@ from bot.services.scheduler import (
 from bot.utils.formatting import format_help
 from bot.utils.logging_config import setup_logging
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
 setup_logging()
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Unknown command handler
-# ---------------------------------------------------------------------------
+# Registration order matters: piano's text handler must run before calories'
+# refine handler so /piano log's pending_piano_log state wins. The catch-all
+# unknown-command handler is attached after this loop.
+HANDLER_MODULES = (
+    profiles,
+    goals,
+    piano,
+    calories,
+    liquids,
+    summary,
+    supplements,
+    model,
+    review
+)
 
 
 async def unknown_cmd(update, context) -> None:
@@ -66,9 +73,13 @@ async def error_handler(update, context) -> None:
             pass
 
 
-# ---------------------------------------------------------------------------
-# Startup / shutdown hooks
-# ---------------------------------------------------------------------------
+def _collect_bot_commands() -> list[BotCommand]:
+    """Flatten the per-module COMMANDS lists into BotCommand objects."""
+    commands: list[BotCommand] = []
+    for module in HANDLER_MODULES:
+        for name, desc in getattr(module, "COMMANDS", []):
+            commands.append(BotCommand(name, desc))
+    return commands
 
 
 async def post_init(app: Application) -> None:
@@ -77,25 +88,7 @@ async def post_init(app: Application) -> None:
     await db_postgres.init_pg()
     init_llm()
 
-    # Set bot commands for the hamburger menu
-    commands = [
-        BotCommand("cal", "Log a meal (photo or text)"),
-        BotCommand("liquid", "Log a drink (amount and type)"),
-        BotCommand("recipe", "Log a recipe from URL or text"),
-        BotCommand("yes", "Confirm and log the pending preview"),
-        BotCommand("today", "List today's meals & drinks (with delete buttons)"),
-        BotCommand("summary", "Show today's meal summary"),
-        BotCommand("week", "Last 7 days overview"),
-        BotCommand("report", "Daily report for dietitian"),
-        BotCommand("review", "AI review of your day (wins, concerns, suggestions)"),
-        BotCommand("goal", "Set daily calorie target"),
-        BotCommand("profile", "Manage profiles (add/list/switch/delete/set)"),
-        BotCommand("stats", "Show BMR, TDEE and macro targets"),
-        BotCommand("supplement", "Manage supplements (add/list/done/remove)"),
-        BotCommand("piano", "Piano practice coach (log/checkin/analyze)"),
-        BotCommand("model", "View or switch LLM provider/model"),
-    ]
-    await app.bot.set_my_commands(commands)
+    await app.bot.set_my_commands(_collect_bot_commands())
 
     scheduler = init_scheduler()
     app.bot_data["scheduler"] = scheduler
@@ -120,11 +113,6 @@ async def post_shutdown(app: Application) -> None:
     logger.info("Bot shut down")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -138,21 +126,11 @@ def main() -> None:
         .build()
     )
 
-    # Register handlers
-    profiles.register(app)
-    goals.register(app)
-    piano.register(app)
-    calories.register(app)
-    liquids.register(app)
-    summary.register(app)
-    review.register(app)
-    supplements.register(app)
-    model.register(app)
+    for module in HANDLER_MODULES:
+        module.register(app)
 
     # Catch-all for unknown commands (must be last)
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
-
-    # Global error handler
     app.add_error_handler(error_handler)
 
     logger.info("Starting polling…")
