@@ -19,6 +19,7 @@ from bot.handlers import (
     model,
     piano,
     profiles,
+    review,
     summary,
     supplements,
 )
@@ -27,6 +28,7 @@ from bot.services.llm import init_llm
 from bot.services.scheduler import (
     init_scheduler,
     load_all_reminders,
+    register_daily_review,
     register_daily_summary,
     register_piano_checkin,
     shutdown,
@@ -51,6 +53,7 @@ HANDLER_MODULES = (
     summary,
     supplements,
     model,
+    review
 )
 
 
@@ -92,6 +95,7 @@ async def post_init(app: Application) -> None:
 
     await load_all_reminders(scheduler, app.bot)
     register_daily_summary(scheduler, app.bot)
+    register_daily_review(scheduler, app.bot)
     register_piano_checkin(scheduler, app.bot)
     start(scheduler)
 

@@ -355,6 +355,138 @@ async def analyze_recipe(recipe_text: str, servings: int | None = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Daily nutrition review
+# ---------------------------------------------------------------------------
+
+_REVIEW_SYSTEM = (
+    "You are a nutrition coach reviewing one day of eating and drinking for a user. "
+    "You receive the full day's logged data (meals, drinks, totals vs. goal, hydration, "
+    "supplement compliance). Produce a short, warm but candid daily review. "
+    "Structure the review with exactly these three sections, in this exact order and with "
+    "these exact emoji headers on their own lines:\n"
+    "\u2705 Wins\n"
+    "\u26a0\ufe0f Concerns\n"
+    "\u27a1\ufe0f Tomorrow\n"
+    "Under each header, write 2\u20134 short bullet points starting with '- '. "
+    "Every bullet must be bilingual in the form '<English> / <Polish>' (slash-separated, "
+    "one line per bullet). Keep bullets concrete and grounded in the data provided \u2014 "
+    "cite calories, macros, ml, or specific items rather than generic advice. "
+    "Do not invent data that was not provided. If the day had no food logged, say so plainly. "
+    "Do NOT use markdown fences, headers, or bold; return plain text only."
+)
+
+
+def _format_review_payload(
+    profile_name: str,
+    review_date: str,
+    meals: list[dict],
+    liquids: list[dict],
+    totals: dict,
+    goal: dict,
+    hydration_ml: int,
+    supplements_scheduled: list[dict],
+    supplements_taken_names: list[str],
+) -> str:
+    lines: list[str] = [
+        f"Profile: {profile_name}",
+        f"Date: {review_date}",
+        "",
+        "Meals:",
+    ]
+    if meals:
+        for m in meals:
+            eaten = m.get("eaten_at", "")
+            t = str(eaten)[11:16] if len(str(eaten)) >= 16 else str(eaten)
+            lines.append(
+                f"- {t} {m.get('description', '')} \u2014 "
+                f"{m.get('calories', 0)} kcal | "
+                f"P {m.get('protein_g', 0):g}g | "
+                f"C {m.get('carbs_g', 0):g}g | "
+                f"F {m.get('fat_g', 0):g}g"
+            )
+    else:
+        lines.append("- (none logged)")
+
+    lines.append("")
+    lines.append("Drinks:")
+    if liquids:
+        for l in liquids:
+            drunk = l.get("drunk_at", "")
+            t = str(drunk)[11:16] if len(str(drunk)) >= 16 else str(drunk)
+            lines.append(
+                f"- {t} {l.get('description', '')} ({l.get('amount_ml', 0)}ml) \u2014 "
+                f"{l.get('calories', 0)} kcal"
+            )
+    else:
+        lines.append("- (none logged)")
+
+    goal_cals = goal.get("daily_calories") or 0
+    lines.extend([
+        "",
+        "Totals:",
+        f"- Calories: {totals.get('calories', 0)} / {goal_cals} kcal",
+        f"- Protein: {totals.get('protein_g', 0):g}g"
+        + (f" / {goal['daily_protein_g']:g}g" if goal.get("daily_protein_g") else ""),
+        f"- Carbs: {totals.get('carbs_g', 0):g}g"
+        + (f" / {goal['daily_carbs_g']:g}g" if goal.get("daily_carbs_g") else ""),
+        f"- Fat: {totals.get('fat_g', 0):g}g"
+        + (f" / {goal['daily_fat_g']:g}g" if goal.get("daily_fat_g") else ""),
+        f"- Hydration: {hydration_ml} ml",
+    ])
+
+    if supplements_scheduled:
+        lines.append("")
+        lines.append("Supplements:")
+        taken = set(supplements_taken_names)
+        for s in supplements_scheduled:
+            status = "taken" if s["name"] in taken else "missed"
+            lines.append(f"- {s['name']} @ {s['reminder_time']}: {status}")
+
+    return "\n".join(lines)
+
+
+async def review_day(
+    profile_name: str,
+    review_date: str,
+    meals: list[dict],
+    liquids: list[dict],
+    totals: dict,
+    goal: dict,
+    hydration_ml: int,
+    supplements_scheduled: list[dict] | None = None,
+    supplements_taken_names: list[str] | None = None,
+) -> str:
+    """Generate a bilingual daily nutrition review via the active LLM.
+
+    Returns the review text (plain, no JSON). Raised exceptions propagate so
+    the caller can decide how to surface errors to the user.
+    """
+    client, model = get_llm_client()
+
+    payload = _format_review_payload(
+        profile_name, review_date, meals, liquids, totals, goal, hydration_ml,
+        supplements_scheduled or [], supplements_taken_names or [],
+    )
+
+    messages: list[dict] = [
+        {"role": "system", "content": _REVIEW_SYSTEM},
+        {"role": "user", "content": payload},
+    ]
+
+    logger.debug("review_day: model=%s profile=%s date=%s", model, profile_name, review_date)
+
+    response = await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.5,
+    )
+
+    content = (response.choices[0].message.content or "").strip()
+    logger.debug("review_day raw response: %s", content)
+    return content
+
+
+# ---------------------------------------------------------------------------
 # Image compression
 # ---------------------------------------------------------------------------
 
