@@ -8,7 +8,7 @@ from datetime import date, datetime
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
-from bot.services import db_postgres, db_sqlite
+from bot.services import db
 from bot.services.llm import LLMParseError
 from bot.services.piano import audio_agent, coach, repertoire, streaks
 from bot.utils.storage import save_piano_recording
@@ -129,9 +129,9 @@ async def piano_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _piano_summary(update: Update, owner_id: int) -> None:
-    streak = await db_sqlite.get_piano_streak(owner_id)
-    pieces = await db_sqlite.list_piano_pieces(owner_id)
-    sessions = await db_sqlite.list_piano_sessions(owner_id, limit=1)
+    streak = await db.get_piano_streak(owner_id)
+    pieces = await db.list_piano_pieces(owner_id)
+    sessions = await db.list_piano_sessions(owner_id, limit=1)
 
     lines: list[str] = []
     current = int(streak.get("current_streak") or 0)
@@ -195,29 +195,18 @@ async def _ingest_log(update: Update, owner_id: int, body: str) -> None:
 
     practiced_at = date.today()
 
-    session_id = await db_sqlite.log_piano_session(
+    await db.log_piano_session(
         owner_id=owner_id,
         practiced_at=practiced_at,
         duration_minutes=duration,
         notes=notes,
         pieces_practiced=pieces_practiced,
     )
-    await db_postgres.mirror_log_piano_session(
-        session_id,
-        owner_id,
-        practiced_at,
-        duration,
-        notes,
-        pieces_practiced,
-    )
 
     for title in pieces_practiced:
         piece = await repertoire.find_piece_by_title(owner_id, title)
         if piece:
-            await db_sqlite.touch_piano_piece_last_practiced(
-                owner_id, piece["id"], practiced_at,
-            )
-            await db_postgres.mirror_touch_piano_piece_last_practiced(
+            await db.touch_piano_piece_last_practiced(
                 owner_id, piece["id"], practiced_at,
             )
 
@@ -257,7 +246,7 @@ async def _piano_checkin(
 
 
 async def _piano_pieces_list(update: Update, owner_id: int) -> None:
-    pieces = await db_sqlite.list_piano_pieces(owner_id)
+    pieces = await db.list_piano_pieces(owner_id)
     await update.message.reply_text(repertoire.format_pieces_list(pieces))
 
 
@@ -305,8 +294,7 @@ async def _piano_piece_add(update: Update, owner_id: int, body: str) -> None:
             f"Piece '{existing['title']}' already in your repertoire."
         )
         return
-    piece_id = await db_sqlite.add_piano_piece(owner_id, title, composer)
-    await db_postgres.mirror_add_piano_piece(piece_id, owner_id, title, composer)
+    await db.add_piano_piece(owner_id, title, composer)
     composer_str = f" by {composer}" if composer else ""
     await update.message.reply_text(
         f"\U0001f4d6 Added '{title}'{composer_str} to your repertoire."
@@ -335,8 +323,7 @@ async def _piano_piece_status(update: Update, owner_id: int, body: str) -> None:
     if piece is None:
         await update.message.reply_text(f"Piece '{title_part}' not found.")
         return
-    await db_sqlite.update_piano_piece_status(owner_id, piece["id"], new_status)
-    await db_postgres.mirror_update_piano_piece_status(owner_id, piece["id"], new_status)
+    await db.update_piano_piece_status(owner_id, piece["id"], new_status)
     emoji = repertoire.status_emoji(new_status)
     await update.message.reply_text(
         f"{emoji} '{piece['title']}' → {new_status}"
@@ -359,8 +346,7 @@ async def _piano_piece_note(update: Update, owner_id: int, body: str) -> None:
         await update.message.reply_text("Note text required after the piece title.")
         return
 
-    await db_sqlite.update_piano_piece_note(owner_id, piece["id"], note)
-    await db_postgres.mirror_update_piano_piece_note(owner_id, piece["id"], note)
+    await db.update_piano_piece_note(owner_id, piece["id"], note)
     await update.message.reply_text(f"Note saved for '{piece['title']}'.")
 
 
@@ -372,9 +358,8 @@ async def _piano_piece_remove(update: Update, owner_id: int, body: str) -> None:
     if piece is None:
         await update.message.reply_text(f"Piece '{body}' not found.")
         return
-    ok = await db_sqlite.remove_piano_piece(owner_id, piece["id"])
+    ok = await db.remove_piano_piece(owner_id, piece["id"])
     if ok:
-        await db_postgres.mirror_remove_piano_piece(owner_id, piece["id"])
         await update.message.reply_text(f"Removed '{piece['title']}'.")
     else:
         await update.message.reply_text(f"Could not remove '{body}'.")
@@ -388,7 +373,7 @@ async def _match_piece_prefix(
     Returns (piece, remaining_text_after_title). Falls back to a whole-body
     lookup if no prefix matches.
     """
-    pieces = await db_sqlite.list_piano_pieces(owner_id)
+    pieces = await db.list_piano_pieces(owner_id)
     if not pieces:
         return (None, body.strip())
 
@@ -416,7 +401,7 @@ async def _piano_history(update: Update, owner_id: int, args: list[str]) -> None
             limit = max(1, min(int(args[1]), 50))
         except ValueError:
             pass
-    sessions = await db_sqlite.list_piano_sessions(owner_id, limit=limit)
+    sessions = await db.list_piano_sessions(owner_id, limit=limit)
     if not sessions:
         await update.message.reply_text("No sessions logged yet.")
         return
@@ -437,10 +422,10 @@ async def _piano_history(update: Update, owner_id: int, args: list[str]) -> None
 
 
 async def _piano_stats(update: Update, owner_id: int) -> None:
-    totals = await db_sqlite.piano_total_stats(owner_id)
-    streak = await db_sqlite.get_piano_streak(owner_id)
-    top = await db_sqlite.most_practiced_piece(owner_id)
-    pieces = await db_sqlite.list_piano_pieces(owner_id)
+    totals = await db.piano_total_stats(owner_id)
+    streak = await db.get_piano_streak(owner_id)
+    top = await db.most_practiced_piece(owner_id)
+    pieces = await db.list_piano_pieces(owner_id)
 
     total_sessions = int(totals.get("total_sessions") or 0)
     total_minutes = int(totals.get("total_minutes") or 0)
@@ -614,22 +599,13 @@ async def _run_analysis(
 
     summary = (analysis.get("overall_impression") or "").strip()[:500] or None
     try:
-        recording_id = await db_sqlite.add_piano_recording(
+        await db.add_piano_recording(
             owner_id=owner_id,
             piece_id=(piece["id"] if piece else None),
             file_path=file_path,
             duration_seconds=duration,
             feedback_summary=summary,
             raw_analysis=json.dumps(analysis),
-        )
-        await db_postgres.mirror_add_piano_recording(
-            recording_id,
-            owner_id,
-            (piece["id"] if piece else None),
-            file_path,
-            duration,
-            summary,
-            json.dumps(analysis),
         )
     except Exception:
         logger.error("Failed to persist piano recording", exc_info=True)

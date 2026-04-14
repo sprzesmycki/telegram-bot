@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 
-from bot.services import db_postgres, db_sqlite
+from bot.services import db
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ async def compute_and_update_streak(owner_id: int, practiced_at: date) -> dict:
       - gap > 1 or no prior history: reset current to 1
     Always bumps longest to max(longest, current) and updates last_practiced_date.
     """
-    current = await db_sqlite.get_piano_streak(owner_id)
+    current = await db.get_piano_streak(owner_id)
     last = _as_date(current.get("last_practiced_date"))
     current_streak = int(current.get("current_streak") or 0)
     longest_streak = int(current.get("longest_streak") or 0)
@@ -52,14 +52,11 @@ async def compute_and_update_streak(owner_id: int, practiced_at: date) -> dict:
 
     new_longest = max(longest_streak, new_current)
 
-    await db_sqlite.upsert_piano_streak(
+    await db.upsert_piano_streak(
         owner_id=owner_id,
         current_streak=new_current,
         longest_streak=new_longest,
         last_practiced_date=practiced_at,
-    )
-    await db_postgres.mirror_upsert_piano_streak(
-        owner_id, new_current, new_longest, practiced_at,
     )
 
     return {

@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
 from bot.handlers.profiles import resolve_single_profile
-from bot.services import db_sqlite
+from bot.services import db
 from bot.utils.formatting import format_report, format_summary, format_week
 
 logger = logging.getLogger(__name__)
@@ -31,11 +31,11 @@ async def summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("Profile not found.")
         return
 
-    meals = await db_sqlite.get_meals_today(profile["id"], owner_id)
-    liquids = await db_sqlite.get_liquids_today(profile["id"], owner_id)
-    totals = await db_sqlite.get_daily_totals(profile["id"], owner_id)
-    goal = await db_sqlite.get_goal(profile["id"])
-    hydration = await db_sqlite.get_daily_hydration(profile["id"], owner_id)
+    meals = await db.get_meals_today(profile["id"], owner_id)
+    liquids = await db.get_liquids_today(profile["id"], owner_id)
+    totals = await db.get_daily_totals(profile["id"], owner_id)
+    goal = await db.get_goal(profile["id"])
+    hydration = await db.get_daily_hydration(profile["id"], owner_id)
 
     reply = format_summary(profile["name"], meals, liquids, totals, goal, hydration)
     await update.message.reply_text(reply)
@@ -60,8 +60,8 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     start_str = start.isoformat()
     end_str = (today + timedelta(days=1)).isoformat()
 
-    meals = await db_sqlite.get_meals_range(profile["id"], owner_id, start_str, end_str)
-    liquids = await db_sqlite.get_liquids_range(profile["id"], owner_id, start_str, end_str)
+    meals = await db.get_meals_range(profile["id"], owner_id, start_str, end_str)
+    liquids = await db.get_liquids_range(profile["id"], owner_id, start_str, end_str)
 
     # Aggregate calories per day
     per_day: dict[str, int] = defaultdict(int)
@@ -87,7 +87,7 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ds = d.isoformat()
         daily_data.append({"date": ds, "calories": per_day.get(ds, 0)})
 
-    goal = await db_sqlite.get_goal(profile["id"])
+    goal = await db.get_goal(profile["id"])
     reply = format_week(profile["name"], daily_data, goal)
     await update.message.reply_text(reply)
 
@@ -114,8 +114,8 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         report_date = date.today().isoformat()
 
     next_day = (datetime.strptime(report_date, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
-    meals = await db_sqlite.get_meals_range(profile["id"], owner_id, report_date, next_day)
-    liquids = await db_sqlite.get_liquids_range(profile["id"], owner_id, report_date, next_day)
+    meals = await db.get_meals_range(profile["id"], owner_id, report_date, next_day)
+    liquids = await db.get_liquids_range(profile["id"], owner_id, report_date, next_day)
 
     # Calculate totals
     total = {"calories": 0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 0.0}
@@ -133,11 +133,11 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         total["fat_g"] += liquid["fat_g"] or 0
         hydration_ml += liquid["amount_ml"] or 0
 
-    goal = await db_sqlite.get_goal(profile["id"])
+    goal = await db.get_goal(profile["id"])
     total["goal"] = goal
 
-    supplements_scheduled = await db_sqlite.list_supplements(profile["id"], owner_id)
-    supplements_taken = await db_sqlite.get_supplement_logs_today(profile["id"])
+    supplements_scheduled = await db.list_supplements(profile["id"], owner_id)
+    supplements_taken = await db.get_supplement_logs_today(profile["id"])
 
     # Enrich taken logs with supplement names for matching
     taken_with_names: list[dict] = []
@@ -164,11 +164,11 @@ async def send_daily_summary(bot, owner_id: int, profile: dict) -> None:
 
     Called by the scheduler -- not by a user command.
     """
-    meals = await db_sqlite.get_meals_today(profile["id"], owner_id)
-    liquids = await db_sqlite.get_liquids_today(profile["id"], owner_id)
-    totals = await db_sqlite.get_daily_totals(profile["id"], owner_id)
-    goal = await db_sqlite.get_goal(profile["id"])
-    hydration = await db_sqlite.get_daily_hydration(profile["id"], owner_id)
+    meals = await db.get_meals_today(profile["id"], owner_id)
+    liquids = await db.get_liquids_today(profile["id"], owner_id)
+    totals = await db.get_daily_totals(profile["id"], owner_id)
+    goal = await db.get_goal(profile["id"])
+    hydration = await db.get_daily_hydration(profile["id"], owner_id)
 
     text = format_summary(profile["name"], meals, liquids, totals, goal, hydration)
     await bot.send_message(chat_id=owner_id, text=text)

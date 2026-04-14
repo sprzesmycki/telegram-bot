@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-caloriebot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-caloriebot}
+      POSTGRES_DB: ${POSTGRES_DB:-caloriebot}
+      TZ: Europe/Warsaw
+      PGTZ: Europe/Warsaw
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-caloriebot} -d ${POSTGRES_DB:-caloriebot}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-caloriebot}:${POSTGRES_PASSWORD:-caloriebot}@postgres:5432/${POSTGRES_DB:-caloriebot}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["uv", "run", "alembic", "upgrade", "head"]
+    restart: "no"
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-caloriebot}:${POSTGRES_PASSWORD:-caloriebot}@postgres:5432/${POSTGRES_DB:-caloriebot}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 
-from bot.services import db_sqlite
+from bot.services import db
 from bot.services.llm import get_llm_client
 from bot.services.piano import repertoire
 
@@ -20,9 +20,9 @@ def format_streak(current_streak: int) -> str:
 
 async def build_coach_context(owner_id: int) -> dict:
     """Collect the fresh context the lightweight model needs for a check-in."""
-    streak = await db_sqlite.get_piano_streak(owner_id)
-    pieces = await db_sqlite.list_piano_pieces(owner_id)
-    sessions = await db_sqlite.list_piano_sessions(owner_id, limit=3)
+    streak = await db.get_piano_streak(owner_id)
+    pieces = await db.list_piano_pieces(owner_id)
+    sessions = await db.list_piano_sessions(owner_id, limit=3)
 
     session_summaries: list[str] = []
     for s in sessions:

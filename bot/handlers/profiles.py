@@ -5,7 +5,7 @@ import logging
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
-from bot.services import db_sqlite, db_postgres
+from bot.services import db
 from bot.utils.formatting import format_profile_list, parse_target
 from bot.utils.nutrition import calculate_bmr, calculate_tdee, calculate_macros
 
@@ -45,7 +45,7 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if sub == "add" and len(args) >= 2:
         name = args[1]
-        existing = await db_sqlite.list_profiles(owner_id)
+        existing = await db.list_profiles(owner_id)
         existing_names = {p["name"] for p in existing}
 
         if name in existing_names:
@@ -55,48 +55,42 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Auto-create "Me" as default if this is the first profile
         # and the user isn't explicitly adding "Me" themselves.
         if not existing and name != "Me":
-            me_id = await db_sqlite.create_profile(owner_id, "Me")
-            await db_sqlite.set_active_profile(owner_id, me_id)
-            await db_postgres.mirror_create_profile(me_id, owner_id, "Me")
-            await db_postgres.mirror_set_active_profile(owner_id, me_id)
+            me_id = await db.create_profile(owner_id, "Me")
+            await db.set_active_profile(owner_id, me_id)
 
-        profile_id = await db_sqlite.create_profile(owner_id, name)
-        await db_postgres.mirror_create_profile(profile_id, owner_id, name)
+        profile_id = await db.create_profile(owner_id, name)
 
         # If the user's first profile is the one they named themselves,
         # make it active.
         if not existing:
-            await db_sqlite.set_active_profile(owner_id, profile_id)
-            await db_postgres.mirror_set_active_profile(owner_id, profile_id)
+            await db.set_active_profile(owner_id, profile_id)
 
         await update.message.reply_text(f"Profile '{name}' created.")
 
     elif sub == "list":
-        profiles = await db_sqlite.list_profiles(owner_id)
-        active = await db_sqlite.get_active_profile(owner_id)
+        profiles = await db.list_profiles(owner_id)
+        active = await db.get_active_profile(owner_id)
         active_id = active["id"] if active else None
         text = format_profile_list(profiles, active_id) if profiles else "No profiles yet."
         await update.message.reply_text(text)
 
     elif sub == "switch" and len(args) >= 2:
         name = args[1]
-        profile = await db_sqlite.get_profile_by_name(owner_id, name)
+        profile = await db.get_profile_by_name(owner_id, name)
         if profile is None:
             await update.message.reply_text(f"Profile '{name}' not found.")
             return
-        await db_sqlite.set_active_profile(owner_id, profile["id"])
-        await db_postgres.mirror_set_active_profile(owner_id, profile["id"])
+        await db.set_active_profile(owner_id, profile["id"])
         await update.message.reply_text(f"Switched to profile '{name}'.")
 
     elif sub == "delete" and len(args) >= 2:
         name = args[1]
-        profiles = await db_sqlite.list_profiles(owner_id)
+        profiles = await db.list_profiles(owner_id)
         if len(profiles) <= 1:
             await update.message.reply_text("Cannot delete your last profile.")
             return
-        deleted = await db_sqlite.delete_profile(owner_id, name)
+        deleted = await db.delete_profile(owner_id, name)
         if deleted:
-            await db_postgres.mirror_delete_profile(owner_id, name)
             await update.message.reply_text(f"Profile '{name}' deleted.")
         else:
             await update.message.reply_text(f"Profile '{name}' not found.")
@@ -138,8 +132,7 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
 
         for p in targets:
-            await db_sqlite.update_profile(p["id"], owner_id, **kwargs)
-            await db_postgres.mirror_update_profile(p["id"], owner_id, **kwargs)
+            await db.update_profile(p["id"], owner_id, **kwargs)
 
         names = ", ".join(p["name"] for p in targets)
         await update.message.reply_text(f"Updated {field} for: {names}")
@@ -189,19 +182,12 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         macros = calculate_macros(tdee, w)
 
         # Automatically save these as goals
-        await db_sqlite.set_goal(
-            p["id"], 
-            int(tdee), 
+        await db.set_goal(
+            p["id"],
+            int(tdee),
             protein_g=round(macros["protein_g"], 1),
             carbs_g=round(macros["carbs_g"], 1),
-            fat_g=round(macros["fat_g"], 1)
-        )
-        await db_postgres.mirror_set_goal(
-            p["id"], 
-            int(tdee), 
-            protein_g=round(macros["protein_g"], 1),
-            carbs_g=round(macros["carbs_g"], 1),
-            fat_g=round(macros["fat_g"], 1)
+            fat_g=round(macros["fat_g"], 1),
         )
 
         resp = (
@@ -231,15 +217,15 @@ async def get_target_profiles(owner_id: int, text: str) -> list[dict]:
     profile_name, is_both = parse_target(text)
 
     if is_both:
-        return await db_sqlite.get_all_profiles(owner_id)
+        return await db.get_all_profiles(owner_id)
 
     if profile_name is not None:
-        profile = await db_sqlite.get_profile_by_name(owner_id, profile_name)
+        profile = await db.get_profile_by_name(owner_id, profile_name)
         if profile is None:
             return []
         return [profile]
 
-    active = await db_sqlite.ensure_default_profile(owner_id)
+    active = await db.ensure_default_profile(owner_id)
     return [active]
 
 

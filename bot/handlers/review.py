@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
 from bot.handlers.profiles import get_target_profiles
-from bot.services import db_sqlite
+from bot.services import db
 from bot.services.llm import review_day
 
 logger = logging.getLogger(__name__)
@@ -34,12 +34,12 @@ async def _gather_day_data(
     is_today = review_date == today_str
 
     if is_today:
-        meals = await db_sqlite.get_meals_today(profile["id"], owner_id)
-        liquids = await db_sqlite.get_liquids_today(profile["id"], owner_id)
-        totals = await db_sqlite.get_daily_totals(profile["id"], owner_id)
-        hydration = await db_sqlite.get_daily_hydration(profile["id"], owner_id)
-        supplements_scheduled = await db_sqlite.list_supplements(profile["id"], owner_id)
-        supplement_logs = await db_sqlite.get_supplement_logs_today(profile["id"])
+        meals = await db.get_meals_today(profile["id"], owner_id)
+        liquids = await db.get_liquids_today(profile["id"], owner_id)
+        totals = await db.get_daily_totals(profile["id"], owner_id)
+        hydration = await db.get_daily_hydration(profile["id"], owner_id)
+        supplements_scheduled = await db.list_supplements(profile["id"], owner_id)
+        supplement_logs = await db.get_supplement_logs_today(profile["id"])
         taken_names: list[str] = []
         for log in supplement_logs:
             for s in supplements_scheduled:
@@ -50,10 +50,10 @@ async def _gather_day_data(
         next_day = (
             datetime.strptime(review_date, "%Y-%m-%d").date() + timedelta(days=1)
         ).isoformat()
-        meals = await db_sqlite.get_meals_range(
+        meals = await db.get_meals_range(
             profile["id"], owner_id, review_date, next_day
         )
-        liquids = await db_sqlite.get_liquids_range(
+        liquids = await db.get_liquids_range(
             profile["id"], owner_id, review_date, next_day
         )
         totals = {"calories": 0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 0.0}
@@ -72,7 +72,7 @@ async def _gather_day_data(
         supplements_scheduled = []
         taken_names = []
 
-    goal = await db_sqlite.get_goal(profile["id"])
+    goal = await db.get_goal(profile["id"])
 
     return {
         "meals": meals,

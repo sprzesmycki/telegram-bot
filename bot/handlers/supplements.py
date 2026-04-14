@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 from bot.handlers.profiles import resolve_single_profile
-from bot.services import db_postgres, db_sqlite
+from bot.services import db
 from bot.utils.formatting import format_supplement_list
 
 logger = logging.getLogger(__name__)
@@ -83,11 +83,8 @@ async def _supplement_add(
         await update.message.reply_text("Profile not found.")
         return
 
-    supplement_id = await db_sqlite.add_supplement(
+    supplement_id = await db.add_supplement(
         profile["id"], owner_id, name, reminder_time, dose,
-    )
-    await db_postgres.mirror_add_supplement(
-        supplement_id, profile["id"], owner_id, name, reminder_time, dose,
     )
 
     # Register scheduler job if scheduler is available
@@ -123,7 +120,7 @@ async def _supplement_list(
         await update.message.reply_text("Profile not found.")
         return
 
-    supplements = await db_sqlite.list_supplements(profile["id"], owner_id)
+    supplements = await db.list_supplements(profile["id"], owner_id)
     if not supplements:
         await update.message.reply_text(f"No supplements for {profile['name']}.")
         return
@@ -145,14 +142,12 @@ async def _supplement_done(
         await update.message.reply_text("Profile not found.")
         return
 
-    supplement = await db_sqlite.get_supplement_by_name(profile["id"], owner_id, name)
+    supplement = await db.get_supplement_by_name(profile["id"], owner_id, name)
     if supplement is None:
         await update.message.reply_text(f"Supplement '{name}' not found.")
         return
 
-    await db_sqlite.log_supplement_taken(supplement["id"], profile["id"])
-    # Mirror — pass 0 as log_id since we don't track it; ON CONFLICT handles dupes
-    await db_postgres.mirror_log_supplement_taken(0, supplement["id"], profile["id"])
+    await db.log_supplement_taken(supplement["id"], profile["id"])
 
     await update.message.reply_text(
         f"{name} marked as taken for {profile['name']}."
@@ -176,15 +171,13 @@ async def _supplement_remove(
         await update.message.reply_text("Profile not found.")
         return
 
-    supplement = await db_sqlite.get_supplement_by_name(profile["id"], owner_id, name)
+    supplement = await db.get_supplement_by_name(profile["id"], owner_id, name)
     if supplement is None:
         await update.message.reply_text(f"Supplement '{name}' not found.")
         return
 
-    removed = await db_sqlite.remove_supplement(profile["id"], owner_id, name)
+    removed = await db.remove_supplement(profile["id"], owner_id, name)
     if removed:
-        await db_postgres.mirror_remove_supplement(profile["id"], owner_id, name)
-
         # Remove scheduler job
         scheduler = context.bot_data.get("scheduler")
         if scheduler is not None:
@@ -224,12 +217,11 @@ async def supplement_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     owner_id = update.effective_user.id
 
     if action == "sd":
-        await db_sqlite.log_supplement_taken(supplement_id, profile_id)
-        await db_postgres.mirror_log_supplement_taken(0, supplement_id, profile_id)
+        await db.log_supplement_taken(supplement_id, profile_id)
         await query.edit_message_text("\u2705 Marked as taken!")
 
     elif action == "ss":
-        supplement = await db_sqlite.get_supplement_by_id(supplement_id)
+        supplement = await db.get_supplement_by_id(supplement_id)
         if supplement is None:
             await query.edit_message_text("Supplement not found.")
             return
@@ -257,7 +249,7 @@ async def register_existing_reminders(scheduler, bot) -> None:
     """
     from bot.services.scheduler import register_supplement_reminder
 
-    supplements = await db_sqlite.get_all_active_supplements()
+    supplements = await db.get_all_active_supplements()
     for sup in supplements:
         register_supplement_reminder(scheduler, bot, sup)
     logger.info("Registered %d supplement reminders from DB", len(supplements))

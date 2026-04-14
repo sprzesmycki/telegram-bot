@@ -4,11 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-Python 3.14+, managed with `uv`.
+Python 3.14+, managed with `uv`. PostgreSQL is required. The canonical dev loop is docker compose; host-only runs are fine too.
 
 ```bash
-uv sync                     # install deps from uv.lock
-uv run python main.py       # run the bot (polling mode)
+# Docker (preferred) — spins up postgres, runs Alembic once, then starts the bot.
+docker compose up --build
+
+# Host run — you bring your own Postgres (compose exposes 127.0.0.1:5432).
+uv sync
+uv run alembic upgrade head         # apply schema
+uv run python main.py               # run the bot (polling mode)
+
+# Create a new migration
+uv run alembic revision -m "describe change"
+
+# One-shot import from a legacy SQLite file (Europe/Warsaw assumed for naive datetimes)
+SQLITE_PATH=./data/caloriebot.db uv run python scripts/migrate_sqlite_to_pg.py
 ```
 
 There is no test suite, linter, or formatter configured — don't invent commands for them.
@@ -19,20 +30,25 @@ When you add, remove, or rename a user-facing feature (a command, a flow, a sche
 
 ## Environment
 
-- `.env` lives at **`~/.config/telegrambot/.env`** (loaded by `main.py` before any project imports). It is *not* read from the repo root. `.env.example` documents every key.
-- Minimum required keys: `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY` (or the equivalent for `local` / `custom` providers).
-- `DATABASE_URL` is optional — if unset or unreachable, the PostgreSQL mirror silently disables itself (see below).
-- Runtime data lives under `./data/` (SQLite DB, photos, rotating logs) — gitignored.
+- `main.py` calls `load_dotenv` twice with `override=False`: first against **`~/.config/telegrambot/.env`** (host workflow), then against the process env / repo-root `.env` that docker compose injects via `env_file`. Host values win when both are present. Neither file is committed; `.env.example` documents every key.
+- Minimum required keys: `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY` (or the equivalent for `local` / `custom` providers), and a reachable `DATABASE_URL`.
+- `DATABASE_URL` uses plain `postgresql://…` — Alembic's env.py and the asyncpg pool both rewrite it to `postgresql+asyncpg://` / strip the driver suffix as needed, so keep a single canonical URL in env.
+- Inside docker compose the `app` / `migrate` services talk to Postgres on the compose network (`postgres:5432`); host workflows use the port-mapped `127.0.0.1:5432`. `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` feed both the postgres service and the `DATABASE_URL` the app reads.
+- Runtime data lives under `./data/` (photos + rotating logs — gitignored). The DB is no longer on disk; it lives in the `postgres_data` docker volume or whatever Postgres you point `DATABASE_URL` at.
 
 ## Architecture
 
 ### Entry point and handler registration
 `main.py` builds a `telegram.ext.Application`, then each handler module exposes `register(app)` that attaches its own `CommandHandler`/`MessageHandler`. The catch-all `MessageHandler(filters.COMMAND, unknown_cmd)` is registered **last** — order matters. Startup/shutdown work (DB init, LLM init, scheduler boot, loading reminders) happens in `post_init` / `post_shutdown` hooks, not in `main()`.
 
-### Dual-database mirror pattern
-SQLite (via `aiosqlite`) is the **source of truth**; PostgreSQL (via `asyncpg`) is a best-effort mirror. Every mutating operation writes SQLite first, then calls the matching `db_postgres.mirror_*` function. The mirror functions are *deliberately silent* on failure — catch broadly, log, and return. If `DATABASE_URL` is unset or the pool can't be built, `_pool` stays `None` and mirror calls become no-ops. When adding a new write operation, add the corresponding `mirror_*` and call it from the handler.
+### Database: PostgreSQL-only via asyncpg + Alembic
+`bot/services/db.py` owns a single module-level `asyncpg.Pool`. `init_db()` builds it with `server_settings={"timezone": "Europe/Warsaw"}` so `CURRENT_DATE` and `col::date` always mean "Warsaw-local day" without per-query casts; Python-side, `_to_dt` coerces naive datetimes to `ZoneInfo("Europe/Warsaw")` before they hit TIMESTAMPTZ columns. There is no fallback or mirror — if the pool can't connect, the bot fails to start, which is intentional.
 
-Schema lives in two places that must stay in sync: `migrations/init.sql` (SQLite) and `db_postgres._get_pg_schema()` (PostgreSQL, SERIAL/TIMESTAMPTZ variants). Additive column migrations are applied idempotently in `db_sqlite._apply_migrations` and an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` block in `db_postgres.init_pg`.
+Range queries use half-open intervals (`col >= $1 AND col < $2`) rather than `BETWEEN`, because Postgres `BETWEEN` is inclusive on both ends (SQLite string-lex `BETWEEN` happened to work because of date-string ordering). All queries filter by `owner_user_id`; see the Owner isolation section.
+
+Schema changes go through Alembic. `alembic/env.py` is async-configured (`async_engine_from_config` + `connection.run_sync(do_run_migrations)`) and reads `DATABASE_URL` directly, rewriting `postgresql://` → `postgresql+asyncpg://` so the same env var works for runtime asyncpg *and* Alembic. Migrations are **raw SQL via `op.execute()`** — no SQLAlchemy models in the repo. `alembic/versions/0001_initial_schema.py` creates every table + index; add a new revision per change. The compose `migrate` service runs `alembic upgrade head` on boot and `app` depends on `service_completed_successfully` so runtime always sees a current schema.
+
+`scripts/migrate_sqlite_to_pg.py` is a one-shot import for legacy SQLite files. It `TRUNCATE ... RESTART IDENTITY CASCADE`s every table, executemany-inserts with preserved ids, then `setval(pg_get_serial_sequence(...), MAX(id), true)` to reset the SERIAL sequences. Naive SQLite datetimes are attached to `ZoneInfo("Europe/Warsaw")` before insertion. Not idempotent — re-running wipes the target.
 
 ### Owner isolation
 Every query filters by `owner_user_id` (the Telegram user ID). Profiles are namespaced per owner — two users can both have a profile called "Me". Don't write queries that read `profiles`, `meals`, `supplements`, or `supplement_logs` without this filter.
@@ -43,11 +59,11 @@ Every query filters by `owner_user_id` (the Telegram user ID). Profiles are name
 Two bespoke exceptions drive handler UX: `VisionNotSupportedError` (raised when an image is sent to a non-vision model — we map `openai.BadRequestError` to this) and `LLMParseError` (raised after one retry of JSON parsing fails). `_handle_llm_error` in `calories.py` centralizes the user-facing messages.
 
 ### Deleting logged entries
-`/today` (in `calories.py`) lists meals + liquids for today per profile and attaches inline `❌ N` buttons whose `callback_data` encodes the row type and DB id (`delm:<meal_id>` / `dell:<liquid_id>`). The callback handler (`today_delete_callback`, registered via `CallbackQueryHandler(pattern=r"^del[ml]:")`) hard-deletes from SQLite via `delete_meal` / `delete_liquid`, mirrors the delete to Postgres via `mirror_delete_meal` / `mirror_delete_liquid`, and re-renders the message. Ownership is enforced by passing `owner_user_id` into the DELETE `WHERE` clause — never trust the callback payload alone. Delete is **hard** (no `active` column on `meals` / `liquids`); if we later need an audit trail, add the column and switch the DELETE to `UPDATE ... SET active = 0`.
+`/today` (in `calories.py`) lists meals + liquids for today per profile and attaches inline `❌ N` buttons whose `callback_data` encodes the row type and DB id (`delm:<meal_id>` / `dell:<liquid_id>`). The callback handler (`today_delete_callback`, registered via `CallbackQueryHandler(pattern=r"^del[ml]:")`) hard-deletes via `db.delete_meal` / `db.delete_liquid` and re-renders the message. Ownership is enforced by passing `owner_user_id` into the DELETE `WHERE` clause — never trust the callback payload alone. Delete is **hard** (no `active` column on `meals` / `liquids`); if we later need an audit trail, add the column via a new Alembic revision and switch the DELETE to `UPDATE ... SET active = 0`.
 
 ### Meal analysis: preview → refine → confirm
 `/cal` and `/recipe` **never** log immediately. They stash a `pending_meal` dict in `context.user_data` and reply with a preview. Two things can happen next:
-- `/yes` → `yes_cmd` reads the pending dict and writes to the DB(s).
+- `/yes` → `yes_cmd` reads the pending dict and writes to Postgres via `db.log_meal` / `db.log_liquid`.
 - Any plain text → `refine_handler` (registered as `MessageHandler(filters.TEXT & ~filters.COMMAND, ...)`) appends the remark to the accumulated description and re-runs the LLM. This is why plain text in a chat has meaning only when a pending meal exists; otherwise it's a silent no-op.
 
 LLM output is bilingual: `description_en` + `description_pl` (meals) or `dish_name_en` + `dish_name_pl` (recipes) are post-processed into a single `"<en> / <pl>"` string and stored as `description` / `dish_name`. Keep this split intact in prompts — the schema is load-bearing for both DB storage and message formatting.
@@ -61,13 +77,13 @@ Every user-facing handler that operates on a profile routes through `get_target_
 The first `/profile add <Name>` (when `Name != "Me"`) auto-creates a `Me` profile alongside the user-supplied one — intentional behaviour, see `profiles.profile_cmd` under `sub == "add"`. Separately, `ensure_default_profile` creates `Me` lazily on any first command that targets an active profile.
 
 ### Scheduler
-`APScheduler`'s `AsyncIOScheduler` is created in `post_init`, stored on `app.bot_data["scheduler"]`, and started there. On boot, `load_all_reminders` reads every active supplement from SQLite and registers a `CronTrigger` per `HH:MM` (job ID format `supplement_<id>`). `/supplement add` and `/supplement remove` incrementally add/remove jobs on this same scheduler. `register_daily_summary` adds one cron job at `DAILY_SUMMARY_TIME` that iterates all owners and sends `format_summary` per profile. `register_daily_review` adds job `daily_review` at `DAILY_REVIEW_TIME` (default 22:00) that iterates profile owners and calls `review.send_daily_review` per profile; it silently skips profiles with no meals/drinks logged today so we don't nag users who were off. `register_piano_checkin` adds a cron job `piano_checkin` at `PIANO_CHECKIN_TIME` (default 19:00) that iterates owners from `db_sqlite.get_piano_owners()` (plus all profile owners) and skips anyone with a session already logged today.
+`APScheduler`'s `AsyncIOScheduler` is created in `post_init`, stored on `app.bot_data["scheduler"]`, and started there. On boot, `load_all_reminders` reads every active supplement from Postgres and registers a `CronTrigger` per `HH:MM` (job ID format `supplement_<id>`). `/supplement add` and `/supplement remove` incrementally add/remove jobs on this same scheduler. `register_daily_summary` adds one cron job at `DAILY_SUMMARY_TIME` that iterates all owners and sends `format_summary` per profile. `register_daily_review` adds job `daily_review` at `DAILY_REVIEW_TIME` (default 22:00) that iterates profile owners and calls `review.send_daily_review` per profile; it silently skips profiles with no meals/drinks logged today so we don't nag users who were off. `register_piano_checkin` adds a cron job `piano_checkin` at `PIANO_CHECKIN_TIME` (default 19:00) that iterates owners from `db.get_piano_owners()` (plus `db.get_distinct_profile_owner_ids()`) and skips anyone with a session already logged today. All three "iterate distinct owners" paths share the `db.get_distinct_profile_owner_ids()` helper — don't write raw `SELECT DISTINCT owner_user_id` queries in the scheduler.
 
 ### Daily AI review (`/review`)
 `/review [@name] [YYYY-MM-DD]` (in `handlers/review.py`) gathers the day's meals, liquids, totals, goal, hydration, and (for today only) supplement compliance, then hands the payload to `llm.review_day` which calls the *currently-selected* `/model` provider with a bilingual coach prompt. The review is plain text with three fixed sections — `✅ Wins`, `⚠️ Concerns`, `➡️ Tomorrow` — each bullet in the form `<English> / <Polish>`. Unlike piano, there's no pinned model tier; the review uses whatever `/model` is active. `send_daily_review` is the scheduler entrypoint and returns silently for empty days. Supplement compliance uses `get_supplement_logs_today` (today-only helper), so for past-date reviews we pass empty supplement lists — if you add a per-date supplement-log query, wire it into `_gather_day_data` in `handlers/review.py`.
 
 ### Piano practice coach
-Piano is **owner-scoped**, not profile-scoped (piano is personal; you don't share it between `Me` / `Wife`). Four tables: `piano_sessions`, `piano_pieces`, `piano_recordings`, `piano_streak`. `pieces_practiced` is stored as a JSON-encoded list — the `_session_row_to_dict` helper in `db_sqlite.py` parses it back on reads.
+Piano is **owner-scoped**, not profile-scoped (piano is personal; you don't share it between `Me` / `Wife`). Four tables: `piano_sessions`, `piano_pieces`, `piano_recordings`, `piano_streak`. `pieces_practiced` is stored as JSONB — the `_session_row_to_dict` helper in `db.py` decodes the value on read (asyncpg returns it as either a Python list or a JSON string depending on the driver path).
 
 Two LLM tiers via `get_llm_client(model_override=...)`: `PIANO_CHAT_MODEL` for `/piano checkin` and `/piano log` encouragement (cheap/fast), `PIANO_ANALYSIS_MODEL` only for `/piano analyze`. The override means `/model` state is not perturbed by piano calls.
 

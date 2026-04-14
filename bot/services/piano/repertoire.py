@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from bot.services import db_sqlite
+from bot.services import db
 
 VALID_STATUSES = ("learning", "polishing", "mastered", "needs_review")
 
@@ -70,4 +70,4 @@ def summarize_in_progress(pieces: list[dict]) -> str:
 
 async def find_piece_by_title(owner_id: int, title: str) -> dict | None:
     """Thin wrapper around the DB helper for handler readability."""
-    return await db_sqlite.find_piano_piece_by_title(owner_id, title)
+    return await db.find_piano_piece_by_title(owner_id, title)

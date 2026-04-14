@@ -4,36 +4,64 @@ A Telegram bot that tracks daily calorie intake (via photo or text), manages sup
 
 ## Prerequisites
 
-- Python 3.14+
-- [uv](https://docs.astral.sh/uv/) package manager
 - Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
 - OpenRouter API key (or local Ollama / custom LLM endpoint)
-- PostgreSQL (optional — used as mirror backup)
+- Docker + docker compose **or** Python 3.14+ with [uv](https://docs.astral.sh/uv/) and a reachable PostgreSQL 16
 
-## Setup
+## Setup (docker compose — recommended)
 
-1. **Install dependencies:**
-
-   ```bash
-   uv sync
-   ```
-
-2. **Configure environment:**
-
-   Create or edit `~/.config/telegrambot/.env` with your keys (see `.env.example` for all options):
+1. **Create env files.** Copy `.env.example` to `.env` in the repo root (compose reads this). Fill in at minimum:
 
    ```
    TELEGRAM_BOT_TOKEN=your-token-here
    OPENROUTER_API_KEY=your-key-here
+   POSTGRES_USER=calorie
+   POSTGRES_PASSWORD=calorie
+   POSTGRES_DB=caloriebot
+   DATABASE_URL=postgresql://calorie:calorie@postgres:5432/caloriebot
    ```
 
-3. **Run the bot:**
+   `main.py` also reads `~/.config/telegrambot/.env` (host workflow). Both files are honoured; the host file wins on conflict.
+
+2. **Start everything:**
 
    ```bash
-   uv run python main.py
+   docker compose up --build
    ```
 
-   SQLite database is created automatically at `./data/caloriebot.db`. PostgreSQL mirror is optional — if `DATABASE_URL` is not set or the server is unreachable, the bot runs on SQLite only.
+   Compose brings up three services in order: `postgres` (healthcheck `pg_isready`), `migrate` (runs `alembic upgrade head` once and exits), then `app`. Postgres data persists in the `postgres_data` volume. Port `127.0.0.1:5432` is exposed so you can connect from the host.
+
+## Setup (host-only)
+
+1. **Install dependencies:** `uv sync`
+
+2. **Point `DATABASE_URL` at your Postgres** (e.g. the compose-exposed `postgresql://calorie:calorie@localhost:5432/caloriebot`).
+
+3. **Apply migrations:** `uv run alembic upgrade head`
+
+4. **Run the bot:** `uv run python main.py`
+
+## Importing existing SQLite data
+
+If you're upgrading from the SQLite-era bot and want to preserve your history:
+
+```bash
+docker compose up -d postgres migrate       # bring up Postgres + apply schema
+SQLITE_PATH=./data/caloriebot.db uv run python scripts/migrate_sqlite_to_pg.py
+docker compose up -d app                     # start the bot
+```
+
+The script truncates every table then bulk-inserts with preserved primary keys. Naive SQLite timestamps are interpreted as **Europe/Warsaw** local time. Re-running wipes and reimports — it is not idempotent against changes you've made in Postgres after the import.
+
+## Schema migrations
+
+Schema is managed with Alembic; migrations are raw SQL via `op.execute()` (no SQLAlchemy models).
+
+```bash
+uv run alembic upgrade head                  # apply pending migrations
+uv run alembic revision -m "add some column" # create a new revision
+uv run alembic downgrade -1                  # roll back one revision
+```
 
 ## Commands
 
@@ -166,7 +194,7 @@ Caption examples for photos:
 /review @Seba 2026-04-11
 ```
 
-`/today` lists every meal and drink logged today for the targeted profile, numbered and ordered by time, with an inline `❌ N` button per entry. Tapping one hard-deletes that row (from SQLite and the Postgres mirror) and re-renders the message with updated totals — useful for backing out a mistaken `/cal` or recipe log.
+`/today` lists every meal and drink logged today for the targeted profile, numbered and ordered by time, with an inline `❌ N` button per entry. Tapping one hard-deletes that row from Postgres and re-renders the message with updated totals — useful for backing out a mistaken `/cal` or recipe log.
 
 `/review` sends the day's full data (meals, drinks, totals vs. goal, hydration, supplement compliance) to the active LLM and replies with a short coach-style review: **✅ Wins**, **⚠️ Concerns**, **➡️ Tomorrow** — every bullet bilingual (EN / PL). It also fires automatically once per day at `DAILY_REVIEW_TIME` (default `22:00`), one message per profile, skipping profiles with nothing logged that day. Pass `YYYY-MM-DD` to review a past date (supplement compliance is only included for today).
 
@@ -230,12 +258,15 @@ Switch at runtime with `/model local gemma3:27b` — no restart needed.
 ```
 bot/
   handlers/    — Telegram command handlers (one file per feature)
-  services/    — LLM client, SQLite, PostgreSQL, APScheduler
+  services/    — db.py (asyncpg pool), llm.py, scheduler.py, piano/
   utils/       — Message formatting and text parsing
-migrations/    — Database schema
+alembic/       — Schema migrations (raw SQL via op.execute)
+scripts/       — One-shot ops (SQLite → Postgres import)
+Dockerfile     — App image
+compose.yml    — postgres + migrate + app
 main.py        — Entry point
 ```
 
-- **Primary DB:** SQLite (async via aiosqlite)
-- **Mirror DB:** PostgreSQL (async via asyncpg) — every write is replicated; failures are silent
-- **Scheduler:** APScheduler for supplement reminders, daily calorie summaries, daily AI reviews, and daily piano check-ins
+- **DB:** PostgreSQL 16 (async via asyncpg). Session TZ pinned to `Europe/Warsaw` so `CURRENT_DATE` means "Warsaw-local day".
+- **Migrations:** Alembic async env, raw SQL. `docker compose up` runs `alembic upgrade head` once before the app starts.
+- **Scheduler:** APScheduler for supplement reminders, daily calorie summaries, daily AI reviews, and daily piano check-ins.
