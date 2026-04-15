@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 
 def init_scheduler() -> AsyncIOScheduler:
-    scheduler = AsyncIOScheduler()
+    from zoneinfo import ZoneInfo
+    scheduler = AsyncIOScheduler(timezone=ZoneInfo("Europe/Warsaw"))
     logger.info("Scheduler created")
     return scheduler
 
@@ -268,10 +269,133 @@ def register_piano_checkin(scheduler: AsyncIOScheduler, bot) -> None:
 
 
 async def load_all_reminders(scheduler: AsyncIOScheduler, bot) -> None:
-    """Load all active supplements from DB and register reminder jobs."""
+    """Load all active supplements and generic reminders from DB and register jobs."""
+    from zoneinfo import ZoneInfo
     from bot.services import db
 
     supplements = await db.get_all_active_supplements()
     for sup in supplements:
         register_supplement_reminder(scheduler, bot, sup)
     logger.info("Loaded %d supplement reminders from DB", len(supplements))
+
+    now = datetime.now(ZoneInfo("Europe/Warsaw"))
+    reminders = await db.get_all_active_reminders()
+    loaded = 0
+    for reminder in reminders:
+        if not reminder.get("repeat", True):
+            remind_at = reminder.get("remind_at")
+            if remind_at is None or remind_at <= now:
+                # One-time reminder whose time already passed — deactivate silently.
+                await db.deactivate_reminder(reminder["id"])
+                logger.info("Deactivated past one-time reminder #%s", reminder["id"])
+                continue
+        register_reminder_job(scheduler, bot, reminder)
+        loaded += 1
+    logger.info("Loaded %d generic reminders from DB", loaded)
+
+
+# ---------------------------------------------------------------------------
+# Generic reminders
+# ---------------------------------------------------------------------------
+
+
+def _build_reminder_keyboard(reminder_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("\u2705 Zrobione", callback_data=f"rd:{reminder_id}"),
+        InlineKeyboardButton("\U0001f514 +1h",  callback_data=f"rs:{reminder_id}"),
+        InlineKeyboardButton("\u274c Pomiń",    callback_data=f"rx:{reminder_id}"),
+    ]])
+
+
+def register_reminder_job(scheduler: AsyncIOScheduler, bot, reminder: dict) -> None:
+    """Register a job for a generic reminder.
+
+    For recurring reminders (repeat=True): CronTrigger.
+    For one-time reminders (repeat=False): DateTrigger using remind_at.
+    After a one-time reminder fires it is soft-deleted from the DB.
+    """
+    rid = reminder["id"]
+    owner_id = reminder["owner_user_id"]
+    message = reminder["message"]
+    repeat = reminder.get("repeat", True)
+    remind_at = reminder.get("remind_at")
+    job_id = f"reminder_{rid}"
+    keyboard = _build_reminder_keyboard(rid)
+
+    async def _send() -> None:
+        try:
+            await bot.send_message(
+                chat_id=owner_id,
+                text=f"\U0001f514 {message}",
+                reply_markup=keyboard,
+            )
+        except Exception:
+            logger.error("Failed to send reminder id=%s", rid, exc_info=True)
+        if not repeat:
+            from bot.services import db as _db
+            await _db.deactivate_reminder(rid)
+            logger.debug("One-time reminder #%s deactivated after firing", rid)
+
+    if not repeat and remind_at is not None:
+        scheduler.add_job(
+            _send,
+            DateTrigger(run_date=remind_at),
+            id=job_id,
+            replace_existing=True,
+        )
+        logger.debug("Registered one-time reminder job %s at %s", job_id, remind_at)
+    else:
+        parts = reminder["reminder_time"].split(":")
+        hour, minute = int(parts[0]), int(parts[1])
+        days = reminder.get("days_of_week") or "*"
+        trigger_kwargs: dict = {"hour": hour, "minute": minute}
+        if days != "*":
+            trigger_kwargs["day_of_week"] = days
+        scheduler.add_job(
+            _send,
+            CronTrigger(**trigger_kwargs),
+            id=job_id,
+            replace_existing=True,
+        )
+        logger.debug(
+            "Registered recurring reminder job %s at %02d:%02d days=%s",
+            job_id, hour, minute, days,
+        )
+
+
+def remove_reminder_job(scheduler: AsyncIOScheduler, reminder_id: int) -> None:
+    job_id = f"reminder_{reminder_id}"
+    try:
+        scheduler.remove_job(job_id)
+        logger.debug("Removed reminder job %s", job_id)
+    except Exception:
+        logger.debug("Job %s not found for removal", job_id)
+
+
+def schedule_snooze_reminder(
+    scheduler: AsyncIOScheduler, bot, reminder: dict, owner_id: int,
+) -> None:
+    """Schedule a one-shot reminder in 1 hour (snooze)."""
+    rid = reminder["id"]
+    message = reminder["message"]
+    run_at = datetime.now() + timedelta(hours=1)
+    job_id = f"snooze_reminder_{rid}_{owner_id}"
+    keyboard = _build_reminder_keyboard(rid)
+
+    async def _send_snooze() -> None:
+        try:
+            await bot.send_message(
+                chat_id=owner_id,
+                text=f"\U0001f514 {message}",
+                reply_markup=keyboard,
+            )
+        except Exception:
+            logger.error("Failed to send snoozed reminder id=%s", rid, exc_info=True)
+
+    scheduler.add_job(
+        _send_snooze,
+        DateTrigger(run_date=run_at),
+        id=job_id,
+        replace_existing=True,
+    )
+    logger.debug("Snooze scheduled for reminder #%s at %s", rid, run_at.strftime("%H:%M"))

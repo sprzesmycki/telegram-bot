@@ -79,7 +79,12 @@ uv run alembic downgrade -1                  # roll back one revision
 | `/goal <kcal> [@name]` | Set daily calorie target (resets macros) |
 | `/stats [@name]` | Calculate BMR, TDEE and macro goals from profile data |
 | `/profile add\|list\|switch\|delete\|set <name>` | Manage profiles and attributes (height, weight, etc.) |
-| `/supplement add\|list\|done\|remove <name> [HH:MM]` | Manage supplements |
+| `/supplement add\|list\|today\|done\|remove <name> [HH:MM]` | Manage supplements |
+| `/remind add <HH:MM> [days] <message>` | Add a recurring reminder (daily, weekdays, weekends, mon,wed,fri…) |
+| `/remind add once <HH:MM> <message>` | One-time reminder — today or tomorrow |
+| `/remind add once tomorrow\|YYYY-MM-DD <HH:MM> <message>` | One-time on a specific date |
+| `/remind list` | List all active reminders |
+| `/remind remove <id>` | Delete a reminder by ID |
 | `/piano` | Piano summary: streak, pieces in progress, last session |
 | `/piano log [N min] [pieces…]` | Log today's practice; updates streak |
 | `/piano checkin [note]` | LLM coaching check-in (cheap model) |
@@ -204,11 +209,14 @@ Caption examples for photos:
 /supplement add Vitamin_D 09:00
 /supplement add Omega_3 21:00
 /supplement list
+/supplement today
 /supplement done Vitamin_D
 /supplement remove Omega_3
 ```
 
 Supplement names cannot contain spaces — use underscores (`Vitamin_D`, not `Vitamin D`). The reminder fires daily at the given `HH:MM`.
+
+`/supplement today` shows all supplements for today with ✅/⬜ buttons. Tap a button to toggle taken/not-taken; the message updates in place.
 
 **7. Piano practice**
 

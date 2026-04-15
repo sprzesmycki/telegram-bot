@@ -184,18 +184,35 @@ async def _copy_table(
     table: str,
 ) -> int:
     columns, datetime_cols, date_cols = TABLE_SPECS[table]
-    cur = sqlite_conn.execute(f"SELECT {', '.join(columns)} FROM {table}")
-    rows = cur.fetchall()
+    try:
+        cur = sqlite_conn.execute(f"SELECT {', '.join(columns)} FROM {table}")
+        rows = cur.fetchall()
+    except sqlite3.OperationalError as e:
+        logger.error("  Table %s: SQLite error: %s", table, e)
+        return 0
+
     if not rows:
         return 0
 
-    coerced = [_coerce_row(row, columns, datetime_cols, date_cols) for row in rows]
+    try:
+        coerced = [_coerce_row(row, columns, datetime_cols, date_cols) for row in rows]
+    except Exception as e:
+        logger.error("  Table %s: Error coercing rows: %s", table, e)
+        raise
+
     placeholders = ", ".join(f"${i}" for i in range(1, len(columns) + 1))
     sql = (
         f"INSERT INTO {table} ({', '.join(columns)}) "
         f"VALUES ({placeholders})"
     )
-    await pg_conn.executemany(sql, coerced)
+    try:
+        await pg_conn.executemany(sql, coerced)
+    except Exception as e:
+        logger.error("  Table %s: Error inserting rows: %s", table, e)
+        # For small tables, log the actual data to help debugging
+        if len(rows) < 10:
+             logger.error("  Data: %r", coerced)
+        raise
     return len(rows)
 
 
@@ -224,6 +241,11 @@ async def main() -> None:
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         raise SystemExit("DATABASE_URL not set")
+
+    # asyncpg doesn't support the 'postgresql+asyncpg://' scheme often used with SQLAlchemy
+    if database_url.startswith("postgresql+asyncpg://"):
+        database_url = "postgresql://" + database_url[len("postgresql+asyncpg://"):]
+
     if not sqlite_path.exists():
         raise SystemExit(f"SQLite DB not found at {sqlite_path}")
 
@@ -232,7 +254,11 @@ async def main() -> None:
     sqlite_conn.row_factory = sqlite3.Row
 
     logger.info("Connecting to Postgres...")
-    pg_conn = await asyncpg.connect(database_url)
+    try:
+        pg_conn = await asyncpg.connect(database_url)
+    except Exception as e:
+        logger.error("Failed to connect to Postgres: %s", e)
+        raise SystemExit(1)
     try:
         await pg_conn.execute("SET TIME ZONE 'Europe/Warsaw'")
         async with pg_conn.transaction():
