@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 from bot.handlers.profiles import resolve_single_profile
@@ -18,6 +18,7 @@ USAGE = (
     "Usage:\n"
     "/supplement add <name> <HH:MM> [dose] [@profile]\n"
     "/supplement list [@profile]\n"
+    "/supplement today [@profile]\n"
     "/supplement done <name> [@profile]\n"
     "/supplement remove <name> [@profile]"
 )
@@ -43,6 +44,8 @@ async def supplement_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _supplement_add(update, context, owner_id, args, text)
     elif sub == "list":
         await _supplement_list(update, owner_id, text)
+    elif sub == "today":
+        await _supplement_today(update, owner_id, text)
     elif sub == "done":
         await _supplement_done(update, owner_id, args, text)
     elif sub == "remove":
@@ -127,6 +130,75 @@ async def _supplement_list(
 
     reply = format_supplement_list(supplements)
     await update.message.reply_text(reply)
+
+
+async def _supplement_today(
+    update: Update, owner_id: int, text: str,
+) -> None:
+    profile = await resolve_single_profile(owner_id, text)
+    if profile is None:
+        await update.message.reply_text("Profile not found.")
+        return
+
+    supplements = await db.list_supplements(profile["id"], owner_id)
+    if not supplements:
+        await update.message.reply_text(f"No supplements for {profile['name']}.")
+        return
+
+    logs_today = await db.get_supplement_logs_today(profile["id"])
+    taken_ids = {log["supplement_id"] for log in logs_today}
+
+    msg, keyboard = _build_today_view(supplements, taken_ids, profile["name"])
+    await update.message.reply_text(msg, reply_markup=keyboard)
+
+
+def _build_today_view(
+    supplements: list[dict], taken_ids: set[int], profile_name: str,
+) -> tuple[str, InlineKeyboardMarkup]:
+    header = f"Supplements — {profile_name} — today:"
+    rows = []
+    for sup in supplements:
+        checked = sup["id"] in taken_ids
+        icon = "\u2705" if checked else "\u2b1c"
+        dose = f" ({sup['dose']})" if sup.get("dose") else ""
+        label = f"{icon} {sup['name']}{dose} \u2014 {sup['reminder_time']}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"st:{sup['id']}:{sup['profile_id']}")])
+    return header, InlineKeyboardMarkup(rows)
+
+
+async def supplement_today_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle today's taken status for a supplement (inline button on /supplement today)."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        _, sup_id_str, profile_id_str = query.data.split(":")
+        supplement_id = int(sup_id_str)
+        profile_id = int(profile_id_str)
+    except (ValueError, IndexError):
+        logger.error("Invalid supplement today callback data: %s", query.data)
+        return
+
+    owner_id = update.effective_user.id
+
+    logs_today = await db.get_supplement_logs_today(profile_id)
+    taken_ids = {log["supplement_id"] for log in logs_today}
+
+    if supplement_id in taken_ids:
+        await db.delete_supplement_log_today(supplement_id, profile_id)
+    else:
+        await db.log_supplement_taken(supplement_id, profile_id)
+
+    # Re-fetch and re-render in place
+    supplements = await db.list_supplements(profile_id, owner_id)
+    profile = await db.get_profile_by_id(profile_id)
+    profile_name = profile["name"] if profile else str(profile_id)
+
+    logs_today = await db.get_supplement_logs_today(profile_id)
+    taken_ids = {log["supplement_id"] for log in logs_today}
+
+    msg, keyboard = _build_today_view(supplements, taken_ids, profile_name)
+    await query.edit_message_text(msg, reply_markup=keyboard)
 
 
 async def _supplement_done(
@@ -261,10 +333,11 @@ async def register_existing_reminders(scheduler, bot) -> None:
 
 
 COMMANDS: list[tuple[str, str]] = [
-    ("supplement", "Manage supplements (add/list/done/remove)"),
+    ("supplement", "Manage supplements (add/list/today/done/remove)"),
 ]
 
 
 def register(app) -> None:
     app.add_handler(CommandHandler("supplement", supplement_cmd))
     app.add_handler(CallbackQueryHandler(supplement_callback, pattern=r"^s[dsx]:"))
+    app.add_handler(CallbackQueryHandler(supplement_today_callback, pattern=r"^st:"))

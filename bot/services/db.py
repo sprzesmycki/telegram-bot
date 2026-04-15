@@ -830,3 +830,69 @@ async def list_piano_recordings(
             owner_id, piece_id, limit,
         )
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Reminders
+# ---------------------------------------------------------------------------
+
+
+async def add_reminder(
+    owner_id: int,
+    message: str,
+    reminder_time: str,
+    days_of_week: str = "*",
+    repeat: bool = True,
+    remind_at: datetime | None = None,
+) -> int:
+    return await _pool_or_raise().fetchval(
+        """
+        INSERT INTO reminders
+            (owner_user_id, message, reminder_time, days_of_week, repeat, remind_at)
+        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+        """,
+        owner_id, message, reminder_time, days_of_week, repeat, remind_at,
+    )
+
+
+async def list_reminders(owner_id: int) -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM reminders
+        WHERE owner_user_id = $1 AND active = TRUE
+        ORDER BY COALESCE(remind_at::time, reminder_time::time), id
+        """,
+        owner_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_reminder_by_id(owner_id: int, reminder_id: int) -> dict | None:
+    row = await _pool_or_raise().fetchrow(
+        "SELECT * FROM reminders WHERE id = $1 AND owner_user_id = $2 AND active = TRUE",
+        reminder_id, owner_id,
+    )
+    return dict(row) if row else None
+
+
+async def remove_reminder(owner_id: int, reminder_id: int) -> bool:
+    row = await _pool_or_raise().fetchrow(
+        "UPDATE reminders SET active = FALSE WHERE id = $1 AND owner_user_id = $2 AND active = TRUE RETURNING id",
+        reminder_id, owner_id,
+    )
+    return row is not None
+
+
+async def deactivate_reminder(reminder_id: int) -> None:
+    """Soft-delete a reminder after it fires (used for one-time reminders)."""
+    await _pool_or_raise().execute(
+        "UPDATE reminders SET active = FALSE WHERE id = $1",
+        reminder_id,
+    )
+
+
+async def get_all_active_reminders() -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        "SELECT * FROM reminders WHERE active = TRUE ORDER BY owner_user_id, reminder_time"
+    )
+    return [dict(r) for r in rows]

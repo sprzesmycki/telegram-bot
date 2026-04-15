@@ -21,6 +21,7 @@ from bot.handlers import (
     model,
     piano,
     profiles,
+    reminders,
     review,
     summary,
     supplements,
@@ -54,6 +55,7 @@ HANDLER_MODULES = (
     liquids,
     summary,
     supplements,
+    reminders,
     model,
     review
 )
