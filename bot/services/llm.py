@@ -117,6 +117,40 @@ def get_provider_info() -> dict:
     }
 
 
+def get_compare_models() -> list[tuple[str, "AsyncOpenAI", str]]:
+    """Parse COMPARE_MODELS and return (label, client, model_id) triples.
+
+    Each comma-separated entry is either:
+    - ``model_id``            — uses the current provider's client
+    - ``model_id@provider``   — builds a dedicated client for *provider*
+                                (``openrouter``, ``local``, or ``custom``)
+
+    Examples::
+
+        COMPARE_MODELS=gemma3:27b@local
+        COMPARE_MODELS=gemma3:27b@local,google/gemini-2.0-flash-001
+
+    Returns an empty list when the env var is unset or blank.
+    """
+    raw = os.getenv("COMPARE_MODELS", "").strip()
+    if not raw:
+        return []
+
+    result = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "@" in entry:
+            model_id, _, provider = entry.rpartition("@")
+            client, model, _ = _build_client(provider.strip(), model_id.strip())
+        else:
+            client, _ = get_llm_client()
+            model = entry
+        result.append((entry, client, model))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # JSON parsing helpers
 # ---------------------------------------------------------------------------
@@ -144,6 +178,7 @@ async def _call_and_parse_json(
     schema_hint: str = "",
     post_process: Callable[[dict], dict] | None = None,
     model_override: str | None = None,
+    client_override: AsyncOpenAI | None = None,
     temperature: float = 0.3,
 ) -> dict:
     """Call the LLM, parse JSON, retry once if parsing fails.
@@ -153,9 +188,15 @@ async def _call_and_parse_json(
     fields are required (e.g. "with both description_en and description_pl fields").
     *post_process* is an optional transformer applied to the parsed dict
     before returning (e.g. combining bilingual fields).
+    When *client_override* is set it is used directly (paired with
+    *model_override* as the model string); this lets compare-mode calls use
+    a different provider without touching global state.
     Raises ``LLMParseError`` when parsing fails after one retry.
     """
-    client, model = get_llm_client(model_override=model_override)
+    if client_override is not None:
+        client, model = client_override, model_override
+    else:
+        client, model = get_llm_client(model_override=model_override)
     logger.debug("%s: model=%s", label, model)
 
     response = await client.chat.completions.create(
@@ -266,7 +307,13 @@ def _combine_recipe(result: dict) -> dict:
     return _combine_bilingual(result, key="dish_name", en="dish_name_en", pl="dish_name_pl")
 
 
-async def analyze_meal(description: str, image_base64: str | None = None) -> dict:
+async def analyze_meal(
+    description: str,
+    image_base64: str | None = None,
+    *,
+    model_override: str | None = None,
+    client_override: AsyncOpenAI | None = None,
+) -> dict:
     """Analyse a meal from text and/or a photo.
 
     Returns dict with keys: calories, protein_g, carbs_g, fat_g, description.
@@ -305,17 +352,24 @@ async def analyze_meal(description: str, image_base64: str | None = None) -> dic
             messages=messages,
             schema_hint="with both description_en and description_pl fields",
             post_process=_combine_meal,
+            model_override=model_override,
+            client_override=client_override,
         )
     except openai.BadRequestError:
         if image_base64 is not None:
-            _, model = get_llm_client()
+            model = model_override if client_override is not None else get_llm_client(model_override=model_override)[1]
             raise VisionNotSupportedError(
                 f"The current model ({model}) does not support vision/image inputs."
             )
         raise
 
 
-async def analyze_liquid(description: str) -> dict:
+async def analyze_liquid(
+    description: str,
+    *,
+    model_override: str | None = None,
+    client_override: AsyncOpenAI | None = None,
+) -> dict:
     """Analyse a drink from text.
 
     Returns dict with keys: amount_ml, calories, protein_g, carbs_g, fat_g, description.
@@ -330,10 +384,18 @@ async def analyze_liquid(description: str) -> dict:
         messages=messages,
         schema_hint="with both description_en and description_pl fields",
         post_process=_combine_meal,
+        model_override=model_override,
+        client_override=client_override,
     )
 
 
-async def analyze_recipe(recipe_text: str, servings: int | None = None) -> dict:
+async def analyze_recipe(
+    recipe_text: str,
+    servings: int | None = None,
+    *,
+    model_override: str | None = None,
+    client_override: AsyncOpenAI | None = None,
+) -> dict:
     """Analyse a recipe and return total / per-serving macros.
 
     Raises ``LLMParseError`` when the model fails to return valid JSON.
@@ -351,6 +413,8 @@ async def analyze_recipe(recipe_text: str, servings: int | None = None) -> dict:
         messages=messages,
         schema_hint="with both dish_name_en and dish_name_pl fields",
         post_process=_combine_recipe,
+        model_override=model_override,
+        client_override=client_override,
     )
 
 
@@ -455,13 +519,19 @@ async def review_day(
     hydration_ml: int,
     supplements_scheduled: list[dict] | None = None,
     supplements_taken_names: list[str] | None = None,
+    *,
+    model_override: str | None = None,
+    client_override: AsyncOpenAI | None = None,
 ) -> str:
     """Generate a bilingual daily nutrition review via the active LLM.
 
     Returns the review text (plain, no JSON). Raised exceptions propagate so
     the caller can decide how to surface errors to the user.
     """
-    client, model = get_llm_client()
+    if client_override is not None:
+        client, model = client_override, model_override
+    else:
+        client, model = get_llm_client(model_override=model_override)
 
     payload = _format_review_payload(
         profile_name, review_date, meals, liquids, totals, goal, hydration_ml,

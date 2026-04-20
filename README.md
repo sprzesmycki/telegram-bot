@@ -261,6 +261,31 @@ First form shows the current provider/model; the others switch at runtime.
 
 Switch at runtime with `/model local gemma3:27b` — no restart needed.
 
+### Model comparison
+
+Set `COMPARE_MODELS` to a comma-separated list of model specs to run them alongside the primary model.  Each spec is either a plain model ID (uses the current provider) or `model_id@provider` to use a different provider:
+
+```
+# Compare primary OpenRouter model with a local Ollama model
+COMPARE_MODELS=gemma3:27b@local
+
+# Two extra models — one local, one different OpenRouter model
+COMPARE_MODELS=gemma3:27b@local,google/gemini-2.0-flash-001
+```
+
+When set, `/cal` (text and photo) and `/review` (manual and scheduled) run all models in parallel and send one labelled message per model, e.g.:
+
+```
+[anthropic/claude-sonnet-4.5]   ← primary model (from /model)
+250 kcal | P: 20g | C: 15g | F: 12g
+Reply /yes to log, or send a remark to refine.
+
+[gemma3:27b@local]
+230 kcal | P: 18g | C: 14g | F: 11g
+```
+
+Supported providers in `@provider`: `openrouter`, `local`, `custom`. The primary model's estimate is always what `/yes` confirms — compare messages are informational only.
+
 ## Architecture
 
 ```

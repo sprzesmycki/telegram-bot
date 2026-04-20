@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, date, time
+from zoneinfo import ZoneInfo
+
+_WARSAW = ZoneInfo("Europe/Warsaw")
 
 
 # ---------------------------------------------------------------------------
@@ -148,10 +151,17 @@ def format_liquid_logged(
 
 
 def _format_eaten_at(eaten_at: str | datetime) -> str:
-    """Return HH:MM from a datetime object or a string."""
+    """Return HH:MM (Europe/Warsaw) from a datetime object or a string.
+
+    asyncpg returns TIMESTAMPTZ as UTC-aware datetimes, so we always convert
+    timezone-aware values to Warsaw before formatting. Naive datetimes are
+    assumed to already be in Warsaw local time (legacy path).
+    """
     if isinstance(eaten_at, datetime):
+        if eaten_at.tzinfo is not None:
+            eaten_at = eaten_at.astimezone(_WARSAW)
         return eaten_at.strftime("%H:%M")
-    # Try common ISO-ish formats
+    # Try common ISO-ish formats (legacy string path — naive, already Warsaw)
     for fmt in (
         "%Y-%m-%dT%H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S.%f",
@@ -164,9 +174,12 @@ def _format_eaten_at(eaten_at: str | datetime) -> str:
             return datetime.strptime(eaten_at, fmt).strftime("%H:%M")
         except (ValueError, TypeError):
             continue
-    # Fallback via datetime.fromisoformat (handles more ISO variants)
+    # Fallback via datetime.fromisoformat (handles timezone offsets too)
     try:
-        return datetime.fromisoformat(eaten_at).strftime("%H:%M")
+        dt = datetime.fromisoformat(eaten_at)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(_WARSAW)
+        return dt.strftime("%H:%M")
     except (ValueError, TypeError):
         pass
     # Already HH:MM or something short

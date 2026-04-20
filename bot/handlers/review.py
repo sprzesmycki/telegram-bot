@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import date, datetime, timedelta
@@ -7,9 +8,10 @@ from datetime import date, datetime, timedelta
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
+from bot.handlers._common import handle_llm_error
 from bot.handlers.profiles import get_target_profiles
 from bot.services import db
-from bot.services.llm import review_day
+from bot.services.llm import get_compare_models, get_llm_client, review_day
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +116,15 @@ async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"\U0001f9e0 Reviewing {profile['name']} \u2014 {review_date}\u2026"
     )
 
-    try:
-        review_text = await review_day(
+    compare_models = get_compare_models()
+    _, primary_model = get_llm_client()
+    # (label, client_override, model_override) — primary uses global state (None, None)
+    all_specs = [(primary_model, None, None)] + [
+        (label, client, model_id) for label, client, model_id in compare_models
+    ]
+
+    tasks = [
+        review_day(
             profile_name=profile["name"],
             review_date=review_date,
             meals=data["meals"],
@@ -125,14 +134,24 @@ async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             hydration_ml=data["hydration"],
             supplements_scheduled=data["supplements_scheduled"],
             supplements_taken_names=data["supplements_taken_names"],
+            model_override=model_ov,
+            client_override=client_ov,
         )
-    except Exception as exc:
-        logger.error("review_day failed", exc_info=True)
-        await update.message.reply_text(f"Review failed: {exc}")
-        return
+        for (_, client_ov, model_ov) in all_specs
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    header = f"Daily Review \u2014 {profile['name']} ({review_date})\n\n"
-    await update.message.reply_text(header + review_text)
+    use_labels = len(all_specs) > 1
+    for (label, _, _), review_text in zip(all_specs, results):
+        if isinstance(review_text, Exception):
+            logger.error("review_day failed for model=%s", label, exc_info=True)
+            err_msg = handle_llm_error(review_text) or str(review_text)
+            err = f"[{label}] {err_msg}" if use_labels else err_msg
+            await update.message.reply_text(err)
+        else:
+            suffix = f" [{label}]" if use_labels else ""
+            header = f"Daily Review \u2014 {profile['name']} ({review_date}){suffix}\n\n"
+            await update.message.reply_text(header + review_text)
 
 
 # ---------------------------------------------------------------------------
@@ -151,8 +170,14 @@ async def send_daily_review(bot, owner_id: int, profile: dict) -> None:
     if not data["meals"] and not data["liquids"]:
         return
 
-    try:
-        review_text = await review_day(
+    compare_models = get_compare_models()
+    _, primary_model = get_llm_client()
+    all_specs = [(primary_model, None, None)] + [
+        (label, client, model_id) for label, client, model_id in compare_models
+    ]
+
+    tasks = [
+        review_day(
             profile_name=profile["name"],
             review_date=today_str,
             meals=data["meals"],
@@ -162,16 +187,24 @@ async def send_daily_review(bot, owner_id: int, profile: dict) -> None:
             hydration_ml=data["hydration"],
             supplements_scheduled=data["supplements_scheduled"],
             supplements_taken_names=data["supplements_taken_names"],
+            model_override=model_ov,
+            client_override=client_ov,
         )
-    except Exception:
-        logger.error(
-            "Scheduled review_day failed for owner=%s profile=%s",
-            owner_id, profile["name"], exc_info=True,
-        )
-        return
+        for (_, client_ov, model_ov) in all_specs
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    header = f"Daily Review \u2014 {profile['name']} ({today_str})\n\n"
-    await bot.send_message(chat_id=owner_id, text=header + review_text)
+    use_labels = len(all_specs) > 1
+    for (label, _, _), review_text in zip(all_specs, results):
+        if isinstance(review_text, Exception):
+            logger.error(
+                "Scheduled review_day failed for owner=%s profile=%s model=%s",
+                owner_id, profile["name"], label, exc_info=True,
+            )
+            continue
+        suffix = f" [{label}]" if use_labels else ""
+        header = f"Daily Review \u2014 {profile['name']} ({today_str}){suffix}\n\n"
+        await bot.send_message(chat_id=owner_id, text=header + review_text)
 
 
 # ---------------------------------------------------------------------------
