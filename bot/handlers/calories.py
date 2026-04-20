@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -25,6 +26,8 @@ from bot.services.llm import (
     analyze_meal,
     analyze_recipe,
     compress_image,
+    get_compare_models,
+    get_llm_client,
 )
 from bot.utils.formatting import (
     format_liquid_logged,
@@ -212,6 +215,72 @@ async def _analyse_or_reply(
 
 
 # ---------------------------------------------------------------------------
+# Multi-model comparison helpers
+# ---------------------------------------------------------------------------
+
+
+def _fmt_compare_meal(
+    model: str,
+    result: dict,
+    profiles: list[dict],
+    eaten_at: datetime,
+) -> str:
+    """Compact meal-preview block labelled with the model name."""
+    desc = result.get("description", "")
+    target = ", ".join(p["name"] for p in profiles)
+    return (
+        f"[{model}]\n"
+        f"{target} at {eaten_at.strftime('%H:%M')}\n"
+        f"{desc}\n"
+        f"{result['calories']} kcal | P: {result['protein_g']:g}g | C: {result['carbs_g']:g}g | F: {result['fat_g']:g}g"
+    )
+
+
+async def _send_compare_meal_previews(
+    update: Update,
+    pending: dict,
+    compare_models: list,
+) -> None:
+    """Send labelled previews for the primary model + all compare models.
+
+    *compare_models* is a list of ``(label, client, model_id)`` triples from
+    ``get_compare_models()``.  The primary result is already in *pending*;
+    compare models are run here in parallel.  The primary model's result stays
+    in pending so /yes always confirms the primary.
+    """
+    _, primary_model = get_llm_client()
+    profiles = pending["profiles"]
+    eaten_at = pending["eaten_at"]
+    description = pending["description"]
+    image_b64 = pending.get("image_base64")
+
+    primary_block = _fmt_compare_meal(primary_model, pending["result"], profiles, eaten_at)
+    await update.message.reply_text(
+        primary_block + "\n\nReply /yes to log, or send a remark to refine."
+    )
+
+    tasks = [
+        analyze_meal(
+            description,
+            image_base64=image_b64,
+            model_override=model_id,
+            client_override=client,
+        )
+        for (_, client, model_id) in compare_models
+    ]
+    cmp_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for (label, _, _), cmp_result in zip(compare_models, cmp_results):
+        if isinstance(cmp_result, Exception):
+            msg = handle_llm_error(cmp_result) or str(cmp_result)
+            await update.message.reply_text(f"[{label}]\n{msg}")
+        else:
+            await update.message.reply_text(
+                _fmt_compare_meal(label, cmp_result, profiles, eaten_at)
+            )
+
+
+# ---------------------------------------------------------------------------
 # /cal command  (text mode)
 # ---------------------------------------------------------------------------
 
@@ -247,7 +316,11 @@ async def cal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "profiles": profiles,
         "result": result,
     }
-    await _send_meal_preview(update, context.user_data["pending_meal"])
+    compare_models = get_compare_models()
+    if compare_models:
+        await _send_compare_meal_previews(update, context.user_data["pending_meal"], compare_models)
+    else:
+        await _send_meal_preview(update, context.user_data["pending_meal"])
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +367,11 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "profiles": profiles,
         "result": result,
     }
-    await _send_meal_preview(update, context.user_data["pending_meal"])
+    compare_models = get_compare_models()
+    if compare_models:
+        await _send_compare_meal_previews(update, context.user_data["pending_meal"], compare_models)
+    else:
+        await _send_meal_preview(update, context.user_data["pending_meal"])
 
 
 # ---------------------------------------------------------------------------

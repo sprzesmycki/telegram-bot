@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_WARSAW = ZoneInfo("Europe/Warsaw")
 
 import openai
 
@@ -60,6 +63,14 @@ def handle_llm_error(exc: Exception) -> str | None:
             f"Model not found at provider: {exc}\n"
             "Check /model and switch to a valid model."
         )
+    if isinstance(exc, openai.APIConnectionError):
+        logger.error("LLM connection error", exc_info=True)
+        return (
+            "Could not reach the LLM endpoint (connection refused or DNS failure).\n"
+            "If targeting a local model: is Ollama running? "
+            "When the bot runs in Docker, set LOCAL_BASE_URL=http://host.docker.internal:11434/v1 "
+            "so the container can reach the host."
+        )
     if isinstance(exc, openai.APIError):
         logger.error("LLM API error", exc_info=True)
         return f"LLM API error: {exc}"
@@ -71,13 +82,25 @@ def handle_llm_error(exc: Exception) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def fmt_hhmm(iso_ts: str | None) -> str:
-    """Extract HH:MM from a stored ISO timestamp; fall back to '?' on junk."""
+def fmt_hhmm(iso_ts) -> str:
+    """Extract HH:MM (Europe/Warsaw) from a datetime or ISO string; '?' on junk.
+
+    asyncpg returns TIMESTAMPTZ as UTC-aware datetime objects, so we convert
+    timezone-aware values to Warsaw. Naive datetimes/strings are assumed to
+    already be in Warsaw local time (legacy path).
+    """
     if not iso_ts:
         return "?"
+    if isinstance(iso_ts, datetime):
+        if iso_ts.tzinfo is not None:
+            iso_ts = iso_ts.astimezone(_WARSAW)
+        return iso_ts.strftime("%H:%M")
     try:
-        return datetime.fromisoformat(iso_ts).strftime("%H:%M")
-    except ValueError:
+        dt = datetime.fromisoformat(iso_ts)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(_WARSAW)
+        return dt.strftime("%H:%M")
+    except (ValueError, TypeError):
         return iso_ts[11:16] if len(iso_ts) >= 16 else iso_ts
 
 
