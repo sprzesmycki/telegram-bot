@@ -14,55 +14,25 @@ load_dotenv(override=False)
 from telegram import BotCommand
 from telegram.ext import Application, MessageHandler, filters
 
-from bot.handlers import (
-    calories,
-    goals,
-    liquids,
-    model,
-    piano,
-    profiles,
-    reminders,
-    review,
-    summary,
-    supplements,
-)
+from bot.modules import load_enabled_modules
 from bot.services import db
 from bot.services.llm import init_llm
 from bot.services.scheduler import (
     init_scheduler,
     load_all_reminders,
-    register_daily_review,
-    register_daily_summary,
-    register_piano_checkin,
     shutdown,
     start,
 )
-from bot.utils.formatting import format_help
 from bot.utils.logging_config import setup_logging
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
 
-# Registration order matters: piano's text handler must run before calories'
-# refine handler so /piano log's pending_piano_log state wins. The catch-all
-# unknown-command handler is attached after this loop.
-HANDLER_MODULES = (
-    profiles,
-    goals,
-    piano,
-    calories,
-    liquids,
-    summary,
-    supplements,
-    reminders,
-    model,
-    review
-)
-
-
 async def unknown_cmd(update, context) -> None:
-    await update.message.reply_text(format_help())
+    await update.message.reply_text(
+        "Unknown command. Use /profile, /remind, /model, or the commands specific to enabled modules."
+    )
 
 
 async def error_handler(update, context) -> None:
@@ -77,32 +47,34 @@ async def error_handler(update, context) -> None:
             pass
 
 
-def _collect_bot_commands() -> list[BotCommand]:
-    """Flatten the per-module COMMANDS lists into BotCommand objects."""
-    commands: list[BotCommand] = []
-    for module in HANDLER_MODULES:
-        for name, desc in getattr(module, "COMMANDS", []):
-            commands.append(BotCommand(name, desc))
-    return commands
-
-
 async def post_init(app: Application) -> None:
     """Run once after the Application has been initialised."""
+    modules = app.bot_data["modules"]
+
     await db.init_db()
     init_llm()
 
-    await app.bot.set_my_commands(_collect_bot_commands())
+    # Collect commands from all loaded modules
+    commands = [
+        BotCommand(name, desc)
+        for mod in modules
+        for name, desc in getattr(mod, "COMMANDS", [])
+    ]
+    await app.bot.set_my_commands(commands)
 
     scheduler = init_scheduler()
     app.bot_data["scheduler"] = scheduler
 
     await load_all_reminders(scheduler, app.bot)
-    register_daily_summary(scheduler, app.bot)
-    register_daily_review(scheduler, app.bot)
-    register_piano_checkin(scheduler, app.bot)
-    start(scheduler)
 
-    logger.info("Bot started")
+    for mod in modules:
+        mod.register_scheduled(scheduler, app.bot)
+
+    start(scheduler)
+    logger.info(
+        "Bot started — modules: %s",
+        [type(m).__name__ for m in modules],
+    )
 
 
 async def post_shutdown(app: Application) -> None:
@@ -110,7 +82,6 @@ async def post_shutdown(app: Application) -> None:
     scheduler = app.bot_data.get("scheduler")
     if scheduler:
         shutdown(scheduler)
-
     await db.close_db()
     logger.info("Bot shut down")
 
@@ -120,6 +91,8 @@ def main() -> None:
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN not set")
 
+    modules = load_enabled_modules()
+
     app = (
         Application.builder()
         .token(token)
@@ -127,9 +100,10 @@ def main() -> None:
         .post_shutdown(post_shutdown)
         .build()
     )
+    app.bot_data["modules"] = modules
 
-    for module in HANDLER_MODULES:
-        module.register(app)
+    for mod in modules:
+        mod.register(app)
 
     # Catch-all for unknown commands (must be last)
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))

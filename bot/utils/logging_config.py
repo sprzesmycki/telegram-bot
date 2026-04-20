@@ -11,7 +11,6 @@ Usage (call once, as early as possible):
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -39,11 +38,14 @@ def _truthy(value: str | None) -> bool:
 
 def setup_logging() -> logging.Logger:
     """Configure the root logger and return it."""
-    debug_mode = _truthy(os.getenv("DEBUG"))
-    level_name = os.getenv("LOG_LEVEL", "DEBUG" if debug_mode else "INFO").upper()
+    from bot.config import get_config
+    cfg = get_config().logging
+
+    debug_mode = cfg.debug
+    level_name = cfg.level
     level = getattr(logging, level_name, logging.INFO)
 
-    log_file = Path(os.getenv("LOG_FILE", "./data/logs/bot.log"))
+    log_file = Path(cfg.file)
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger()
@@ -65,7 +67,7 @@ def setup_logging() -> logging.Logger:
         encoding="utf-8",
     )
     # File always captures DEBUG so you can diff a crash after the fact
-    file_handler.setLevel(logging.DEBUG if debug_mode else logging.INFO)
+    file_handler.setLevel(logging.DEBUG if debug_mode else level)
     file_handler.setFormatter(logging.Formatter(_FILE_FMT, _DATE_FMT))
     root.addHandler(file_handler)
 

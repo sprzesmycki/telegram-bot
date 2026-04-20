@@ -1,8 +1,7 @@
-"""File storage helpers for meal photos."""
+"""File storage helpers for meal photos and piano recordings."""
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +11,8 @@ logger = logging.getLogger(__name__)
 
 def get_photos_dir() -> Path:
     """Return the directory where meal photos are stored, creating it if needed."""
-    path = Path(os.getenv("PHOTOS_DIR", "./data/photos"))
+    from bot.config import get_config
+    path = Path(get_config().storage.photos_dir)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -34,7 +34,8 @@ def save_meal_photo(photo_bytes: bytes, owner_id: int) -> str:
 
 def get_piano_recordings_dir() -> Path:
     """Return the directory where piano recordings are stored, creating it if needed."""
-    path = Path(os.getenv("PIANO_RECORDINGS_DIR", "./data/piano_recordings"))
+    from bot.config import get_config
+    path = Path(get_config().storage.piano_recordings_dir)
     path.mkdir(parents=True, exist_ok=True)
     return path
 

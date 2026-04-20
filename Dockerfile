@@ -20,6 +20,6 @@ RUN uv sync --frozen --no-dev
 
 COPY . .
 
-RUN mkdir -p /app/data/photos /app/data/logs /app/data/piano_recordings
+RUN mkdir -p /app/data/photos /app/data/logs /app/data/piano_recordings /app/data/invoices
 
 CMD ["uv", "run", "python", "main.py"]

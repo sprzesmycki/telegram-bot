@@ -2,38 +2,11 @@ from __future__ import annotations
 
 import base64
 import logging
-import os
 
 from bot.services import db
 from bot.services.llm import _call_and_parse_json
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Analysis (direct audio input)
-# ---------------------------------------------------------------------------
-
-
-_ANALYSIS_SYSTEM = (
-    "You are an expert piano teacher assistant. You will receive an audio "
-    "recording of a student's piano practice together with written context. "
-    "Listen to the audio directly — do not ask for a transcription. Assess "
-    "tempo consistency, rhythmic accuracy, dynamics, phrasing, and technical "
-    "issues. "
-    "Return ONLY valid JSON, no markdown:\n"
-    "{\n"
-    '  "overall_impression": str,          // 1-2 sentences\n'
-    '  "tempo": {"assessment": str, "notes": str},       // assessment in {steady, rushing, dragging, uneven}\n'
-    '  "rhythm": {"assessment": str, "notes": str},      // assessment in {accurate, minor_errors, significant_errors}\n'
-    '  "dynamics": {"assessment": str, "notes": str},\n'
-    '  "problem_areas": [str],             // specific bars or passages to work on\n'
-    '  "strengths": [str],\n'
-    '  "next_session_focus": [str],        // max 3 actionable suggestions\n'
-    '  "progress_vs_last": str             // one of {improved, similar, regressed, first_recording}\n'
-    "}\n"
-    "Always be encouraging but honest. Never refuse to analyse."
-)
 
 
 def _audio_format_for_api(extension: str | None) -> str:
@@ -68,7 +41,8 @@ async def analyze_recording(
     Raises ``LLMParseError`` when the model fails to return valid JSON after
     one retry.
     """
-    analysis_model = os.getenv("PIANO_ANALYSIS_MODEL")
+    from bot.services.agent_runner import load_agent
+    agent = load_agent("bot/modules/piano/agents/recording_analyzer.md")
 
     context_parts: list[str] = []
     if piece:
@@ -112,7 +86,7 @@ async def analyze_recording(
         )
 
     messages = [
-        {"role": "system", "content": _ANALYSIS_SYSTEM},
+        {"role": "system", "content": agent.system_prompt},
         {"role": "user", "content": user_content},
     ]
 
@@ -126,7 +100,7 @@ async def analyze_recording(
     return await _call_and_parse_json(
         label="analyze_recording",
         messages=messages,
-        model_override=analysis_model,
+        model_override=agent.model,
     )
 
 

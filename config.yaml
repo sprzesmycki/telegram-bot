@@ -1,0 +1,38 @@
+bot:
+  timezone: "Europe/Warsaw"
+
+logging:
+  level: "INFO"
+  file: "./data/logs/bot.log"
+  debug: false
+
+llm:
+  provider: "openrouter"
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1"
+    model: "anthropic/claude-sonnet-4.5"
+  local:
+    base_url: "http://localhost:11434/v1"
+    model: "gemma4:26b"
+  custom:
+    base_url: ""
+    model: ""
+  compare_models: []
+
+storage:
+  photos_dir: "./data/photos"
+  piano_recordings_dir: "./data/piano_recordings"
+  invoices_dir: "./data/invoices"
+
+modules:
+  calories:
+    enabled: true
+    schedules:
+      daily_summary_time: "21:00"
+      daily_review_time: "22:00"
+  piano:
+    enabled: true
+    schedules:
+      checkin_time: "19:00"
+  invoices:
+    enabled: false

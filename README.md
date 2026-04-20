@@ -1,6 +1,6 @@
-# Calorie, Supplement & Piano Practice Tracker — Telegram Bot
+# sebson-bot
 
-A Telegram bot that tracks daily calorie intake (via photo or text), manages supplement reminders, and coaches piano practice (streaks, repertoire, voice-note analysis). Supports multiple profiles per account.
+A personal Telegram bot with modular features: calorie & supplement tracking (via photo or text), piano practice coaching (streaks, repertoire, voice-note analysis), and invoice reading (coming soon). Supports multiple profiles per account.
 
 ## Prerequisites
 
@@ -10,20 +10,22 @@ A Telegram bot that tracks daily calorie intake (via photo or text), manages sup
 
 ## Setup (docker compose — recommended)
 
-1. **Create env files.** Copy `.env.example` to `.env` in the repo root (compose reads this). Fill in at minimum:
+1. **Create env file.** Copy `.env.example` to `.env` in the repo root (compose reads this). Fill in secrets:
 
    ```
    TELEGRAM_BOT_TOKEN=your-token-here
    OPENROUTER_API_KEY=your-key-here
-   POSTGRES_USER=calorie
-   POSTGRES_PASSWORD=calorie
-   POSTGRES_DB=caloriebot
-   DATABASE_URL=postgresql://calorie:calorie@postgres:5432/caloriebot
+   POSTGRES_USER=sebson
+   POSTGRES_PASSWORD=your-password-here
+   POSTGRES_DB=sebsonbot
+   DATABASE_URL=postgresql://sebson:your-password-here@postgres:5432/sebsonbot
    ```
 
    `main.py` also reads `~/.config/telegrambot/.env` (host workflow). Both files are honoured; the host file wins on conflict.
 
-2. **Start everything:**
+2. **Review `config.yaml`.** All structured feature config (LLM provider, storage paths, module enable/disable, schedule times) lives there — already committed with sensible defaults. Edit it to toggle modules or change schedule times.
+
+3. **Start everything:**
 
    ```bash
    docker compose up --build
@@ -35,7 +37,7 @@ A Telegram bot that tracks daily calorie intake (via photo or text), manages sup
 
 1. **Install dependencies:** `uv sync`
 
-2. **Point `DATABASE_URL` at your Postgres** (e.g. the compose-exposed `postgresql://calorie:calorie@localhost:5432/caloriebot`).
+2. **Point `DATABASE_URL` at your Postgres** (e.g. the compose-exposed `postgresql://sebson:password@localhost:5432/sebsonbot`).
 
 3. **Apply migrations:** `uv run alembic upgrade head`
 
@@ -62,6 +64,27 @@ uv run alembic upgrade head                  # apply pending migrations
 uv run alembic revision -m "add some column" # create a new revision
 uv run alembic downgrade -1                  # roll back one revision
 ```
+
+## Modules
+
+Features are organised as optional modules, toggled in `config.yaml`:
+
+```yaml
+modules:
+  calories:
+    enabled: true
+    schedules:
+      daily_summary_time: "21:00"
+      daily_review_time: "22:00"
+  piano:
+    enabled: true
+    schedules:
+      checkin_time: "19:00"
+  invoices:
+    enabled: false   # stub — coming soon
+```
+
+Disabling a module removes its commands from the bot and stops its scheduled jobs. The database tables remain untouched.
 
 ## Commands
 
@@ -201,7 +224,7 @@ Caption examples for photos:
 
 `/today` lists every meal and drink logged today for the targeted profile, numbered and ordered by time, with an inline `❌ N` button per entry. Tapping one hard-deletes that row from Postgres and re-renders the message with updated totals — useful for backing out a mistaken `/cal` or recipe log.
 
-`/review` sends the day's full data (meals, drinks, totals vs. goal, hydration, supplement compliance) to the active LLM and replies with a short coach-style review: **✅ Wins**, **⚠️ Concerns**, **➡️ Tomorrow** — every bullet bilingual (EN / PL). It also fires automatically once per day at `DAILY_REVIEW_TIME` (default `22:00`), one message per profile, skipping profiles with nothing logged that day. Pass `YYYY-MM-DD` to review a past date (supplement compliance is only included for today).
+`/review` sends the day's full data (meals, drinks, totals vs. goal, hydration, supplement compliance) to the active LLM and replies with a short coach-style review: **✅ Wins**, **⚠️ Concerns**, **➡️ Tomorrow** — every bullet bilingual (EN / PL). It also fires automatically once per day at `modules.calories.daily_review_time` (default `22:00`), one message per profile, skipping profiles with nothing logged that day. Pass `YYYY-MM-DD` to review a past date (supplement compliance is only included for today).
 
 **6. Supplements**
 
@@ -231,9 +254,9 @@ Supplement names cannot contain spaces — use underscores (`Vitamin_D`, not `Vi
 /piano stats
 ```
 
-Send a voice note of your playing, then reply `/piano analyze` (optionally with a piece title) — the bot sends the raw audio to a multimodal model which listens directly and returns structured feedback (tempo, rhythm, dynamics, problem areas, next-session focus). Daily practice fires a check-in at `PIANO_CHECKIN_TIME` (default 19:00), skipping days you've already logged.
+Send a voice note of your playing, then reply `/piano analyze` (optionally with a piece title) — the bot sends the raw audio to a multimodal model which listens directly and returns structured feedback (tempo, rhythm, dynamics, problem areas, next-session focus). Daily practice fires a check-in at `modules.piano.checkin_time` (default 19:00), skipping days you've already logged.
 
-Two LLM tiers keep costs low: `PIANO_CHAT_MODEL` handles check-ins and log encouragement (cheap/fast text), and `PIANO_ANALYSIS_MODEL` is only called by `/piano analyze`. The analysis model **must accept audio input** via OpenAI-style `input_audio` content blocks — defaults to `google/gemini-2.0-flash-001` (which accepts Telegram's ogg/opus directly). Both are set independently from `/model` so regular `/cal` flow is unaffected.
+Two LLM tiers keep costs low: the practice coach model handles check-ins and log encouragement (cheap/fast text), and the recording analyzer model is only called by `/piano analyze`. Both models are set in their respective agent files (`bot/modules/piano/agents/`) and are independent from `/model`.
 
 **8. Switch LLM provider**
 
@@ -259,47 +282,54 @@ First form shows the current provider/model; the others switch at runtime.
 | `local` | `http://localhost:11434/v1` | Ollama (e.g., Gemma 4) |
 | `custom` | Configurable | Any OpenAI-compatible endpoint |
 
-Switch at runtime with `/model local gemma3:27b` — no restart needed.
+Configure base URLs and default models in `config.yaml` under `llm:`. Switch at runtime with `/model local gemma3:27b` — no restart needed.
 
 ### Model comparison
 
-Set `COMPARE_MODELS` to a comma-separated list of model specs to run them alongside the primary model.  Each spec is either a plain model ID (uses the current provider) or `model_id@provider` to use a different provider:
+Set `compare_models` in `config.yaml` (or the legacy `COMPARE_MODELS` env var) to a list of model specs to run alongside the primary model. Each spec is either a plain model ID (uses the current provider) or `model_id@provider` to use a different provider:
 
-```
-# Compare primary OpenRouter model with a local Ollama model
-COMPARE_MODELS=gemma3:27b@local
-
-# Two extra models — one local, one different OpenRouter model
-COMPARE_MODELS=gemma3:27b@local,google/gemini-2.0-flash-001
-```
-
-When set, `/cal` (text and photo) and `/review` (manual and scheduled) run all models in parallel and send one labelled message per model, e.g.:
-
-```
-[anthropic/claude-sonnet-4.5]   ← primary model (from /model)
-250 kcal | P: 20g | C: 15g | F: 12g
-Reply /yes to log, or send a remark to refine.
-
-[gemma3:27b@local]
-230 kcal | P: 18g | C: 14g | F: 11g
+```yaml
+llm:
+  compare_models:
+    - gemma3:27b@local
+    - google/gemini-2.0-flash-001
 ```
 
-Supported providers in `@provider`: `openrouter`, `local`, `custom`. The primary model's estimate is always what `/yes` confirms — compare messages are informational only.
+When set, `/cal` (text and photo) and `/review` (manual and scheduled) run all models in parallel and send one labelled message per model. The primary model's estimate is always what `/yes` confirms — compare messages are informational only.
 
 ## Architecture
 
 ```
 bot/
-  handlers/    — Telegram command handlers (one file per feature)
-  services/    — db.py (asyncpg pool), llm.py, scheduler.py, piano/
-  utils/       — Message formatting and text parsing
-alembic/       — Schema migrations (raw SQL via op.execute)
-scripts/       — One-shot ops (SQLite → Postgres import)
-Dockerfile     — App image
-compose.yml    — postgres + migrate + app
-main.py        — Entry point
+  modules/        — Optional feature modules (calories, piano, invoices, core)
+    calories/
+      agents/     — LLM agent .md files (meal_analyzer, day_reviewer, …)
+      handlers/   — Telegram command handlers for calories features
+      scheduled.py — Cron jobs (daily summary, daily review)
+    piano/
+      agents/     — LLM agent .md files (practice_coach, recording_analyzer)
+      handlers/   — Telegram command handlers for piano features
+      services/   — Piano business logic (coach, audio_agent, repertoire, streaks)
+      scheduled.py — Cron jobs (piano checkin)
+    invoices/
+      agents/     — LLM agent .md files (invoice_reader)
+      handlers/   — Telegram command handlers (stub)
+    core/         — Always-on: profiles, reminders, model switch
+  handlers/       — Core handlers only (profiles, reminders, model, _common)
+  services/       — db.py, llm.py, scheduler.py, agent_runner.py
+  tools/          — MCP-style tool registry (currently empty)
+  utils/          — Formatting, logging config, nutrition math, file storage
+alembic/          — Schema migrations (raw SQL via op.execute)
+scripts/          — One-shot ops (SQLite → Postgres import)
+config.yaml       — Structured feature config (committed)
+Dockerfile        — App image
+compose.yml       — postgres + migrate + app
+main.py           — Entry point
 ```
 
 - **DB:** PostgreSQL 16 (async via asyncpg). Session TZ pinned to `Europe/Warsaw` so `CURRENT_DATE` means "Warsaw-local day".
 - **Migrations:** Alembic async env, raw SQL. `docker compose up` runs `alembic upgrade head` once before the app starts.
-- **Scheduler:** APScheduler for supplement reminders, daily calorie summaries, daily AI reviews, and daily piano check-ins.
+- **Config:** `config.yaml` for feature config (LLM providers, modules, schedules, storage paths). `.env` for secrets only.
+- **Modules:** each module owns its handlers, scheduled jobs, and agent files. Toggle via `config.yaml`.
+- **Agent files:** every LLM system prompt lives in a `.md` file with YAML frontmatter (`name`, `model`, `tools`). Loaded and executed by `bot/services/agent_runner.py`.
+- **Scheduler:** APScheduler for supplement reminders, and per-module cron jobs (daily calorie summaries, daily AI reviews, daily piano check-ins).

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import logging
-import os
 
 from bot.services import db
 from bot.services.llm import get_llm_client
-from bot.services.piano import repertoire
+from bot.modules.piano.services import repertoire
 
 logger = logging.getLogger(__name__)
 
@@ -42,18 +41,12 @@ async def build_coach_context(owner_id: int) -> dict:
     }
 
 
-_CHECKIN_SYSTEM = (
-    "You are a friendly piano practice coach. Be encouraging, brief, and practical. "
-    "Keep responses under 150 words. Use emojis sparingly. "
-    "Respond in plain text (no markdown, no JSON)."
-)
-
-
 async def run_checkin(owner_id: int, user_note: str | None = None) -> str:
     """Run a single-call coaching check-in. Stateless; always reads fresh context."""
+    from bot.services.agent_runner import load_agent, run_agent
+
+    agent = load_agent("bot/modules/piano/agents/practice_coach.md")
     ctx = await build_coach_context(owner_id)
-    chat_model = os.getenv("PIANO_CHAT_MODEL")
-    client, model = get_llm_client(model_override=chat_model)
 
     user_prompt_parts = [
         f"Current streak: {ctx['current_streak']} days (longest: {ctx['longest_streak']}).",
@@ -72,19 +65,13 @@ async def run_checkin(owner_id: int, user_note: str | None = None) -> str:
         "(3) up to 3 bullet points suggesting what to focus on next."
     )
 
-    messages = [
-        {"role": "system", "content": _CHECKIN_SYSTEM},
-        {"role": "user", "content": "\n".join(user_prompt_parts)},
-    ]
+    logger.debug("piano run_checkin: streak=%d", ctx["current_streak"])
 
-    logger.debug("piano run_checkin: model=%s streak=%d", model, ctx["current_streak"])
-
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
+    return await run_agent(
+        agent,
+        [{"role": "user", "content": "\n".join(user_prompt_parts)}],
         temperature=0.7,
     )
-    return (response.choices[0].message.content or "").strip()
 
 
 async def summarize_log(
@@ -94,9 +81,10 @@ async def summarize_log(
     notes: str | None,
 ) -> str:
     """Short post-log encouragement. One LLM call with the cheap model."""
+    from bot.services.agent_runner import load_agent, run_agent
+
+    agent = load_agent("bot/modules/piano/agents/practice_coach.md")
     ctx = await build_coach_context(owner_id)
-    chat_model = os.getenv("PIANO_CHAT_MODEL")
-    client, model = get_llm_client(model_override=chat_model)
 
     pieces_str = ", ".join(pieces_practiced) if pieces_practiced else "unspecified"
     duration_str = f"{duration_minutes} min" if duration_minutes else "unspecified duration"
@@ -110,14 +98,8 @@ async def summarize_log(
         "suggestion for their next session. Plain text only."
     )
 
-    messages = [
-        {"role": "system", "content": _CHECKIN_SYSTEM},
-        {"role": "user", "content": user_prompt},
-    ]
-
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
+    return await run_agent(
+        agent,
+        [{"role": "user", "content": user_prompt}],
         temperature=0.7,
     )
-    return (response.choices[0].message.content or "").strip()

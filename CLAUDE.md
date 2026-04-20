@@ -26,11 +26,12 @@ There is no test suite, linter, or formatter configured — don't invent command
 
 ## Docs rule
 
-When you add, remove, or rename a user-facing feature (a command, a flow, a scheduled job, or a new env var that a user must set), **always update `README.md` in the same change**. The commands table, the relevant sample-commands section, and any env-var mention must stay in sync with the code. If the feature introduces new architectural context (new DB tables, new LLM tier, new handler pipeline, new scheduler job), also update the matching "Architecture" section in this file. Docs drift is a blocker — treat it as part of the feature, not an afterthought.
+When you add, remove, or rename a user-facing feature (a command, a flow, a scheduled job, or a new config key that a user must set), **always update `README.md` in the same change**. The commands table, the relevant sample-commands section, and any config mention must stay in sync with the code. If the feature introduces new architectural context (new DB tables, new LLM tier, new handler pipeline, new scheduler job), also update the matching "Architecture" section in this file. Docs drift is a blocker — treat it as part of the feature, not an afterthought.
 
 ## Environment
 
 - `main.py` calls `load_dotenv` twice with `override=False`: first against **`~/.config/telegrambot/.env`** (host workflow), then against the process env / repo-root `.env` that docker compose injects via `env_file`. Host values win when both are present. Neither file is committed; `.env.example` documents every key.
+- `.env` holds **secrets only** — API keys, DB credentials, bot token. All structured feature config lives in `config.yaml`.
 - Minimum required keys: `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY` (or the equivalent for `local` / `custom` providers), and a reachable `DATABASE_URL`.
 - `DATABASE_URL` uses plain `postgresql://…` — Alembic's env.py and the asyncpg pool both rewrite it to `postgresql+asyncpg://` / strip the driver suffix as needed, so keep a single canonical URL in env.
 - Inside docker compose the `app` / `migrate` services talk to Postgres on the compose network (`postgres:5432`); host workflows use the port-mapped `127.0.0.1:5432`. `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` feed both the postgres service and the `DATABASE_URL` the app reads.
@@ -38,10 +39,67 @@ When you add, remove, or rename a user-facing feature (a command, a flow, a sche
 
 ## Architecture
 
+### Configuration: config.yaml + bot/config.py
+
+`config.yaml` (committed) is the source of truth for all structured feature config: timezone, logging, LLM provider defaults, storage paths, module enable/disable flags, and schedule times. `bot/config.py` reads it and exposes a typed `AppConfig` singleton via `get_config()`.
+
+`_env(key, yaml_fallback)` in `bot/config.py` applies `.env` overlays for legacy env vars — this lets existing deployments keep working without touching `config.yaml`. Don't add new env-var config; add it to `config.yaml` instead.
+
+Key dataclass tree: `AppConfig → LLMConfig, StorageConfig, LoggingConfig, ModulesConfig → CaloriesModuleConfig, PianoModuleConfig, InvoicesModuleConfig`. All module-level code reads config via `get_config()` — never via `os.getenv()` for anything other than secrets.
+
+### Module system (bot/modules/)
+
+Features are organised as optional modules in `bot/modules/`. Each module directory exposes a `module` singleton (a `*Module` class instance) with:
+- `ENABLED: bool` — read from `get_config().modules.<name>.enabled`
+- `COMMANDS: list[tuple[str, str]]` — bot commands contributed by this module
+- `register(app)` — attaches handlers to the `Application`
+- `register_scheduled(scheduler, bot)` — registers cron jobs owned by this module
+
+`bot/modules/__init__.py::load_enabled_modules()` always loads `CoreModule` (profiles, reminders, model) and conditionally loads `PianoModule`, `CaloriesModule`, and `InvoicesModule` based on their `enabled` flags. `main.py` calls `load_enabled_modules()` and loops over the result — no explicit handler imports in `main.py`.
+
+Module order matters for text-handler dispatch: piano is registered before calories so `piano_text_dispatch` gets first crack at plain-text messages (see Piano section).
+
+**Adding a new module:** create `bot/modules/<name>/`, add a `*Module` class, add the config key to `config.yaml` + `ModulesConfig`, add it to `load_enabled_modules()`.
+
+### Agent files and agent_runner
+
+Every LLM system prompt lives in an `.md` file with YAML frontmatter:
+
+```yaml
+---
+name: meal-analyzer
+model: null          # null = follow active /model; "model-id" = override on current provider; "provider:model-id" = dedicated client
+tools: []            # MCP-style tool names (empty = no tools)
+---
+<system prompt body>
+```
+
+Agent files per module:
+- `bot/modules/calories/agents/` — `meal_analyzer.md`, `liquid_analyzer.md`, `recipe_analyzer.md`, `day_reviewer.md`
+- `bot/modules/piano/agents/` — `practice_coach.md` (`model: google/gemini-flash-1.5`), `recording_analyzer.md` (`model: google/gemini-2.0-flash-001`)
+- `bot/modules/invoices/agents/` — `invoice_reader.md` (`model: local:gemma4:26b`)
+
+`bot/services/agent_runner.py` provides:
+- `load_agent(path: str) -> AgentDefinition` — parses frontmatter + body; `@lru_cache` so each file is read once; paths resolved relative to project root
+- `run_agent(agent, messages, *, response_format=None, temperature=0.3) -> str` — resolves LLM client from `agent.model`, prepends system prompt, calls API, returns content string
+
+Model spec resolution in `_resolve_client(model_spec)`:
+- `None` → `get_llm_client()` (follows active `/model`)
+- `"model-id"` → `get_llm_client(model_override="model-id")` (current provider, different model)
+- `"provider:model-id"` → build a dedicated `AsyncOpenAI` client for that provider
+
+`llm.py`'s `analyze_meal/liquid/recipe` and `review_day` are thin wrappers that load the corresponding agent file and call `run_agent`. Handler code is unchanged.
+
+### MCP-style tool registry (bot/tools/)
+
+`bot/tools/__init__.py` holds a `_REGISTRY: dict[str, ToolDefinition]` of callable tools. Currently empty — no tools are registered for any existing agent. The registry is in place so agent files can list `tools: [tool-name]` and `run_agent` will automatically fetch schemas and pass them as `tools=` to the API when the registry is populated, without any runner changes.
+
 ### Entry point and handler registration
-`main.py` builds a `telegram.ext.Application`, then each handler module exposes `register(app)` that attaches its own `CommandHandler`/`MessageHandler`. The catch-all `MessageHandler(filters.COMMAND, unknown_cmd)` is registered **last** — order matters. Startup/shutdown work (DB init, LLM init, scheduler boot, loading reminders) happens in `post_init` / `post_shutdown` hooks, not in `main()`.
+
+`main.py` calls `load_enabled_modules()`, loops over the returned module list, and calls `mod.register(app)` for each. The catch-all `MessageHandler(filters.COMMAND, unknown_cmd)` is registered **last** — order matters. Startup/shutdown work (DB init, LLM init, scheduler boot, loading reminders) happens in `post_init` / `post_shutdown` hooks. In `post_init`, `mod.register_scheduled(scheduler, bot)` is called per module after the scheduler starts.
 
 ### Database: PostgreSQL-only via asyncpg + Alembic
+
 `bot/services/db.py` owns a single module-level `asyncpg.Pool`. `init_db()` builds it with `server_settings={"timezone": "Europe/Warsaw"}` so `CURRENT_DATE` and `col::date` always mean "Warsaw-local day" without per-query casts; Python-side, `_to_dt` coerces naive datetimes to `ZoneInfo("Europe/Warsaw")` before they hit TIMESTAMPTZ columns. There is no fallback or mirror — if the pool can't connect, the bot fails to start, which is intentional.
 
 Range queries use half-open intervals (`col >= $1 AND col < $2`) rather than `BETWEEN`, because Postgres `BETWEEN` is inclusive on both ends (SQLite string-lex `BETWEEN` happened to work because of date-string ordering). All queries filter by `owner_user_id`; see the Owner isolation section.
@@ -54,12 +112,12 @@ Schema changes go through Alembic. `alembic/env.py` is async-configured (`async_
 Every query filters by `owner_user_id` (the Telegram user ID). Profiles are namespaced per owner — two users can both have a profile called "Me". Don't write queries that read `profiles`, `meals`, `supplements`, or `supplement_logs` without this filter.
 
 ### LLM provider singleton
-`bot/services/llm.py` holds a module-level `(client, model, provider)` triple. `init_llm()` seeds it from env; `switch_provider()` swaps it in place; `get_llm_client()` returns the current pair. The `/model` command mutates this at runtime — no restart. All three providers (`openrouter`, `local`, `custom`) speak the OpenAI API via `AsyncOpenAI`, so only the `base_url` / `api_key` / `model` differ.
+`bot/services/llm.py` holds a module-level `(client, model, provider)` triple. `init_llm()` seeds it from `get_config().llm.*` (API keys still from `os.getenv`); `switch_provider()` swaps it in place; `get_llm_client()` returns the current pair. The `/model` command mutates this at runtime — no restart. All three providers (`openrouter`, `local`, `custom`) speak the OpenAI API via `AsyncOpenAI`, so only the `base_url` / `api_key` / `model` differ.
 
-Two bespoke exceptions drive handler UX: `VisionNotSupportedError` (raised when an image is sent to a non-vision model — we map `openai.BadRequestError` to this) and `LLMParseError` (raised after one retry of JSON parsing fails). `_handle_llm_error` in `calories.py` centralizes the user-facing messages.
+Two bespoke exceptions drive handler UX: `VisionNotSupportedError` (raised when an image is sent to a non-vision model — we map `openai.BadRequestError` to this) and `LLMParseError` (raised after one retry of JSON parsing fails). `_handle_llm_error` in `bot/modules/calories/handlers/calories.py` centralizes the user-facing messages.
 
 ### Deleting logged entries
-`/today` (in `calories.py`) lists meals + liquids for today per profile and attaches inline `❌ N` buttons whose `callback_data` encodes the row type and DB id (`delm:<meal_id>` / `dell:<liquid_id>`). The callback handler (`today_delete_callback`, registered via `CallbackQueryHandler(pattern=r"^del[ml]:")`) hard-deletes via `db.delete_meal` / `db.delete_liquid` and re-renders the message. Ownership is enforced by passing `owner_user_id` into the DELETE `WHERE` clause — never trust the callback payload alone. Delete is **hard** (no `active` column on `meals` / `liquids`); if we later need an audit trail, add the column via a new Alembic revision and switch the DELETE to `UPDATE ... SET active = 0`.
+`/today` (in `bot/modules/calories/handlers/calories.py`) lists meals + liquids for today per profile and attaches inline `❌ N` buttons whose `callback_data` encodes the row type and DB id (`delm:<meal_id>` / `dell:<liquid_id>`). The callback handler (`today_delete_callback`, registered via `CallbackQueryHandler(pattern=r"^del[ml]:")`) hard-deletes via `db.delete_meal` / `db.delete_liquid` and re-renders the message. Ownership is enforced by passing `owner_user_id` into the DELETE `WHERE` clause — never trust the callback payload alone. Delete is **hard** (no `active` column on `meals` / `liquids`); if we later need an audit trail, add the column via a new Alembic revision and switch the DELETE to `UPDATE ... SET active = 0`.
 
 ### Meal analysis: preview → refine → confirm
 `/cal` and `/recipe` **never** log immediately. They stash a `pending_meal` dict in `context.user_data` and reply with a preview. Two things can happen next:
@@ -77,21 +135,33 @@ Every user-facing handler that operates on a profile routes through `get_target_
 The first `/profile add <Name>` (when `Name != "Me"`) auto-creates a `Me` profile alongside the user-supplied one — intentional behaviour, see `profiles.profile_cmd` under `sub == "add"`. Separately, `ensure_default_profile` creates `Me` lazily on any first command that targets an active profile.
 
 ### Scheduler
-`APScheduler`'s `AsyncIOScheduler` is created in `post_init`, stored on `app.bot_data["scheduler"]`, and started there. On boot, `load_all_reminders` reads every active supplement from Postgres and registers a `CronTrigger` per `HH:MM` (job ID format `supplement_<id>`). `/supplement add` and `/supplement remove` incrementally add/remove jobs on this same scheduler. `register_daily_summary` adds one cron job at `DAILY_SUMMARY_TIME` that iterates all owners and sends `format_summary` per profile. `register_daily_review` adds job `daily_review` at `DAILY_REVIEW_TIME` (default 22:00) that iterates profile owners and calls `review.send_daily_review` per profile; it silently skips profiles with no meals/drinks logged today so we don't nag users who were off. `register_piano_checkin` adds a cron job `piano_checkin` at `PIANO_CHECKIN_TIME` (default 19:00) that iterates owners from `db.get_piano_owners()` (plus `db.get_distinct_profile_owner_ids()`) and skips anyone with a session already logged today. All three "iterate distinct owners" paths share the `db.get_distinct_profile_owner_ids()` helper — don't write raw `SELECT DISTINCT owner_user_id` queries in the scheduler.
+`APScheduler`'s `AsyncIOScheduler` is created in `post_init`, stored on `app.bot_data["scheduler"]`, and started there. Core supplement/reminder infrastructure lives in `bot/services/scheduler.py`. On boot, `load_all_reminders` reads every active supplement from Postgres and registers a `CronTrigger` per `HH:MM` (job ID format `supplement_<id>`). `/supplement add` and `/supplement remove` incrementally add/remove jobs on this same scheduler.
+
+Scheduled cron jobs for features are registered by each module's `register_scheduled(scheduler, bot)` call in `post_init`:
+- **Calories** (`bot/modules/calories/scheduled.py`): `daily_summary` (at `modules.calories.daily_summary_time`) and `daily_review` (at `modules.calories.daily_review_time`). Both iterate distinct profile owners and skip profiles with nothing logged.
+- **Piano** (`bot/modules/piano/scheduled.py`): `piano_checkin` (at `modules.piano.checkin_time`). Iterates piano owners and skips days already logged.
+
+All "iterate distinct owners" paths share the `db.get_distinct_profile_owner_ids()` helper — don't write raw `SELECT DISTINCT owner_user_id` queries in the scheduler.
 
 ### Daily AI review (`/review`)
-`/review [@name] [YYYY-MM-DD]` (in `handlers/review.py`) gathers the day's meals, liquids, totals, goal, hydration, and (for today only) supplement compliance, then hands the payload to `llm.review_day` which calls the *currently-selected* `/model` provider with a bilingual coach prompt. The review is plain text with three fixed sections — `✅ Wins`, `⚠️ Concerns`, `➡️ Tomorrow` — each bullet in the form `<English> / <Polish>`. Unlike piano, there's no pinned model tier; the review uses whatever `/model` is active. `send_daily_review` is the scheduler entrypoint and returns silently for empty days. Supplement compliance uses `get_supplement_logs_today` (today-only helper), so for past-date reviews we pass empty supplement lists — if you add a per-date supplement-log query, wire it into `_gather_day_data` in `handlers/review.py`.
+`/review [@name] [YYYY-MM-DD]` (in `bot/modules/calories/handlers/review.py`) gathers the day's meals, liquids, totals, goal, hydration, and (for today only) supplement compliance, then hands the payload to `llm.review_day` which loads `bot/modules/calories/agents/day_reviewer.md` and calls `run_agent`. The review is plain text with three fixed sections — `✅ Wins`, `⚠️ Concerns`, `➡️ Tomorrow` — each bullet in the form `<English> / <Polish>`. Unlike piano, there's no pinned model tier; the review uses whatever `/model` is active. `send_daily_review` is the scheduler entrypoint and returns silently for empty days. Supplement compliance uses `get_supplement_logs_today` (today-only helper), so for past-date reviews we pass empty supplement lists — if you add a per-date supplement-log query, wire it into `_gather_day_data` in `handlers/review.py`.
 
 ### Piano practice coach
 Piano is **owner-scoped**, not profile-scoped (piano is personal; you don't share it between `Me` / `Wife`). Four tables: `piano_sessions`, `piano_pieces`, `piano_recordings`, `piano_streak`. `pieces_practiced` is stored as JSONB — the `_session_row_to_dict` helper in `db.py` decodes the value on read (asyncpg returns it as either a Python list or a JSON string depending on the driver path).
 
-Two LLM tiers via `get_llm_client(model_override=...)`: `PIANO_CHAT_MODEL` for `/piano checkin` and `/piano log` encouragement (cheap/fast), `PIANO_ANALYSIS_MODEL` only for `/piano analyze`. The override means `/model` state is not perturbed by piano calls.
+Piano services live in `bot/modules/piano/services/` (coach, audio_agent, repertoire, streaks). The piano handler is at `bot/modules/piano/handlers/piano.py`.
 
-Voice/audio pipeline: `MessageHandler(filters.VOICE | filters.AUDIO, piano_voice_handler)` handles any audio message. If caption starts with `/piano analyze`, analysis runs inline; otherwise the `file_id`/`duration`/`kind`/`extension` is stashed in `context.user_data["pending_piano_audio"]` and the bot prompts "Is this a piano recording?". `audio_agent.analyze_recording` base64-encodes the raw audio and sends it as an OpenAI-style `input_audio` content block to `PIANO_ANALYSIS_MODEL` — there is **no** whisper/transcription step, because whisper transcribes speech and piano is notes. The model must accept audio input (e.g. `google/gemini-2.0-flash-001`, which accepts ogg/opus directly; `openai/gpt-4o-audio-preview` accepts only wav/mp3 so isn't a drop-in default for Telegram voice messages). No ffmpeg/pydub — raw `.ogg` bytes go straight to the provider.
+Two LLM tiers, configured in agent file frontmatter (not env vars):
+- `bot/modules/piano/agents/practice_coach.md` — `model: google/gemini-flash-1.5` — used for `/piano checkin` and `/piano log` encouragement (cheap/fast)
+- `bot/modules/piano/agents/recording_analyzer.md` — `model: google/gemini-2.0-flash-001` — used only for `/piano analyze`
 
-Text-handler dispatch: `/piano log` with no args stashes `pending_piano_log=True` and prompts "reply like `30 min Chopin, scales`". The next plain-text message triggers `calories.refine_handler`, which calls `piano.piano_text_dispatch` **first**; if that returns `True`, the calorie refine path is skipped. This is why `piano.register(app)` runs before `calories.register(app)` in `main.py` — not strictly required (voice and text filters don't collide), but keeps the mental model consistent.
+Both are resolved via `agent_runner._resolve_client`, so `/model` state is not perturbed.
 
-Streak rules (`bot/services/piano/streaks.py::compute_and_update_streak`): same-day re-log is idempotent; `delta_days == 1` increments; `delta_days > 1` resets to 1; `delta_days <= 0` (backdated) keeps current. Always updates `longest = max(longest, current)`.
+Voice/audio pipeline: `MessageHandler(filters.VOICE | filters.AUDIO, piano_voice_handler)` handles any audio message. If caption starts with `/piano analyze`, analysis runs inline; otherwise the `file_id`/`duration`/`kind`/`extension` is stashed in `context.user_data["pending_piano_audio"]` and the bot prompts "Is this a piano recording?". `audio_agent.analyze_recording` base64-encodes the raw audio and sends it as an OpenAI-style `input_audio` content block — there is **no** whisper/transcription step, because whisper transcribes speech and piano is notes. The model must accept audio input; `google/gemini-2.0-flash-001` accepts ogg/opus directly. No ffmpeg/pydub — raw `.ogg` bytes go straight to the provider.
+
+Text-handler dispatch: `/piano log` with no args stashes `pending_piano_log=True` and prompts "reply like `30 min Chopin, scales`". The next plain-text message triggers `calories.refine_handler`, which calls `piano.piano_text_dispatch` **first** (behind a config guard — only if `get_config().modules.piano.enabled`); if that returns `True`, the calorie refine path is skipped. This is why piano is registered before calories in `load_enabled_modules()`.
+
+Streak rules (`bot/modules/piano/services/streaks.py::compute_and_update_streak`): same-day re-log is idempotent; `delta_days == 1` increments; `delta_days > 1` resets to 1; `delta_days <= 0` (backdated) keeps current. Always updates `longest = max(longest, current)`.
 
 ### Logging
-`bot/utils/logging_config.setup_logging()` must be called **before** any project imports that create module-level loggers. It wires a stdout `StreamHandler` and a `RotatingFileHandler` at `./data/logs/bot.log` (5 MB × 10 files). `DEBUG=1` (or any truthy value) flips both the root level and unmutes the noisy library loggers listed in `_NOISY_LOGGERS`.
+`bot/utils/logging_config.setup_logging()` must be called **before** any project imports that create module-level loggers. It reads `get_config().logging` for level, file path, and debug flag. It wires a stdout `StreamHandler` and a `RotatingFileHandler` at `./data/logs/bot.log` (5 MB × 10 files). Setting `logging.debug: true` in `config.yaml` (or `DEBUG=1` in env) flips both the root level and unmutes the noisy library loggers listed in `_NOISY_LOGGERS`.
