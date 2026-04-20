@@ -10,7 +10,7 @@ from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
 from bot.services import db
 from bot.services.llm import LLMParseError
-from bot.services.piano import audio_agent, coach, repertoire, streaks
+from bot.modules.piano.services import audio_agent, coach, repertoire, streaks
 from bot.utils.storage import save_piano_recording
 
 logger = logging.getLogger(__name__)

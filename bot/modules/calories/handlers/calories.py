@@ -643,10 +643,11 @@ async def refine_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     Silently no-ops when there's nothing pending -- users can chat freely
     until they start a /cal or /recipe flow.
     """
-    from bot.handlers.piano import piano_text_dispatch
-
-    if await piano_text_dispatch(update, context):
-        return
+    from bot.config import get_config
+    if get_config().modules.piano.enabled:
+        from bot.modules.piano.handlers.piano import piano_text_dispatch
+        if await piano_text_dispatch(update, context):
+            return
 
     pending = context.user_data.get("pending_meal")
     if not pending:

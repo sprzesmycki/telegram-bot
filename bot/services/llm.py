@@ -11,6 +11,8 @@ import openai
 from openai import AsyncOpenAI
 from PIL import Image
 
+from bot.config import get_config
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -40,38 +42,40 @@ def _build_client(
 ) -> tuple[AsyncOpenAI, str, str]:
     """Build an AsyncOpenAI client for the given provider.
 
-    Returns (client, model, provider).
+    Returns (client, model, provider). API keys are always read from the
+    environment (secrets); base URLs and default model names come from
+    config.yaml (via get_config()), with env-var overrides honoured there.
     """
+    cfg = get_config().llm
+
     if provider == "local":
         client = AsyncOpenAI(
             api_key=os.getenv("LOCAL_API_KEY", "ollama"),
-            base_url=os.getenv("LOCAL_BASE_URL", "http://localhost:11434/v1"),
+            base_url=cfg.local.base_url,
         )
-        model = model_override or os.getenv("LOCAL_MODEL", "gemma3:27b")
+        model = model_override or cfg.local.model
     elif provider == "custom":
         client = AsyncOpenAI(
             api_key=os.getenv("CUSTOM_API_KEY"),
-            base_url=os.getenv("CUSTOM_BASE_URL"),
+            base_url=cfg.custom.base_url or None,
         )
-        model = model_override or os.getenv("CUSTOM_MODEL")
+        model = model_override or cfg.custom.model
     else:  # openrouter
         provider = "openrouter"
         client = AsyncOpenAI(
             api_key=os.getenv("OPENROUTER_API_KEY"),
-            base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            base_url=cfg.openrouter.base_url,
         )
-        model = model_override or os.getenv(
-            "OPENROUTER_MODEL", "anthropic/claude-3-5-sonnet"
-        )
+        model = model_override or cfg.openrouter.model
 
     return client, model, provider
 
 
 def init_llm() -> None:
-    """Initialise the LLM provider from environment variables."""
+    """Initialise the LLM provider from config."""
     global _current_provider, _current_client, _current_model
 
-    provider = os.getenv("LLM_PROVIDER", "openrouter")
+    provider = get_config().llm.provider
     _current_client, _current_model, _current_provider = _build_client(provider)
     logger.debug(
         "LLM initialised: provider=%s model=%s",
@@ -118,26 +122,20 @@ def get_provider_info() -> dict:
 
 
 def get_compare_models() -> list[tuple[str, "AsyncOpenAI", str]]:
-    """Parse COMPARE_MODELS and return (label, client, model_id) triples.
+    """Parse compare_models config and return (label, client, model_id) triples.
 
-    Each comma-separated entry is either:
+    Each entry is either:
     - ``model_id``            — uses the current provider's client
     - ``model_id@provider``   — builds a dedicated client for *provider*
-                                (``openrouter``, ``local``, or ``custom``)
 
-    Examples::
-
-        COMPARE_MODELS=gemma3:27b@local
-        COMPARE_MODELS=gemma3:27b@local,google/gemini-2.0-flash-001
-
-    Returns an empty list when the env var is unset or blank.
+    Returns an empty list when the setting is unset or blank.
     """
-    raw = os.getenv("COMPARE_MODELS", "").strip()
-    if not raw:
+    entries = get_config().llm.compare_models
+    if not entries:
         return []
 
     result = []
-    for entry in raw.split(","):
+    for entry in entries:
         entry = entry.strip()
         if not entry:
             continue
@@ -185,9 +183,8 @@ async def _call_and_parse_json(
 
     *label* is used purely for logs (e.g. "analyze_meal").
     *schema_hint* is appended to the retry prompt to remind the model which
-    fields are required (e.g. "with both description_en and description_pl fields").
-    *post_process* is an optional transformer applied to the parsed dict
-    before returning (e.g. combining bilingual fields).
+    fields are required.
+    *post_process* is an optional transformer applied to the parsed dict.
     When *client_override* is set it is used directly (paired with
     *model_override* as the model string); this lets compare-mode calls use
     a different provider without touching global state.
@@ -212,14 +209,14 @@ async def _call_and_parse_json(
         logger.debug("%s: first JSON parse failed, retrying", label)
 
     hint = f" {schema_hint}" if schema_hint else ""
-    messages = [
+    retry_messages = [
         *messages,
         {"role": "assistant", "content": content},
         {"role": "user", "content": _RETRY_NUDGE.format(schema_hint=hint)},
     ]
 
     retry_response = await client.chat.completions.create(
-        model=model, messages=messages, temperature=temperature,
+        model=model, messages=retry_messages, temperature=temperature,
     )
     retry_content = retry_response.choices[0].message.content or ""
     logger.debug("%s retry response: %s", label, retry_content)
@@ -235,61 +232,12 @@ async def _call_and_parse_json(
 
 
 # ---------------------------------------------------------------------------
-# Meal analysis
+# Bilingual field combiners
 # ---------------------------------------------------------------------------
-
-_MEAL_SYSTEM = (
-    "You are a nutrition assistant. Always return valid JSON only, no markdown, "
-    "no prose, no code fences. "
-    "Schema (ALL fields REQUIRED, no exceptions): "
-    '{"calories": int, "protein_g": float, "carbs_g": float, "fat_g": float, '
-    '"description_en": str, "description_pl": str}. '
-    '"description_en" is a short English label for the dish. '
-    '"description_pl" is the SAME dish translated to Polish. '
-    "Both fields are mandatory — never omit either. "
-    'Examples: {"description_en": "Scrambled eggs with toast", '
-    '"description_pl": "Jajecznica z tostem"}. '
-    "Always estimate numeric values, never refuse. "
-    "IMPORTANT: If a hand or finger is visible in the photo, use it as a "
-    "scale reference to estimate portion sizes more accurately (e.g., a "
-    "fist is roughly 250ml/1 cup, a palm is ~100g of meat)."
-)
-
-_LIQUID_SYSTEM = (
-    "You are a nutrition assistant specialized in liquids and hydration. "
-    "Always return valid JSON only, no markdown, no prose, no code fences. "
-    "Schema (ALL fields REQUIRED): "
-    '{"amount_ml": int, "calories": int, "protein_g": float, "carbs_g": float, '
-    '"fat_g": float, "description_en": str, "description_pl": str}. '
-    '"description_en" is a short English label for the drink (e.g. "Black coffee"). '
-    '"description_pl" is the SAME drink translated to Polish (e.g. "Czarna kawa"). '
-    "Always estimate numeric values, never refuse. "
-    "If the user doesn't specify an amount, assume a standard glass (250ml)."
-)
-
-_RECIPE_SYSTEM = (
-    "Given a recipe, calculate total calories and macros for the whole dish, "
-    "then divide by servings. Return valid JSON only, no markdown, no prose. "
-    "Schema (ALL fields REQUIRED): "
-    '{"total": {"calories": int, "protein_g": float, "carbs_g": float, "fat_g": float}, '
-    '"per_serving": {"calories": int, "protein_g": float, "carbs_g": float, "fat_g": float}, '
-    '"servings": int, "dish_name_en": str, "dish_name_pl": str}. '
-    '"dish_name_en" is a short English name for the dish. '
-    '"dish_name_pl" is the SAME dish translated to Polish. '
-    "Both name fields are mandatory — never omit either. "
-    'Example: {"dish_name_en": "Creamy tomato pasta", '
-    '"dish_name_pl": "Makaron w sosie pomidorowym", ...}. '
-    "Always estimate, never refuse."
-)
 
 
 def _combine_bilingual(result: dict, *, key: str, en: str, pl: str) -> dict:
-    """Combine ``<en_field>`` + ``<pl_field>`` into a single ``<key>`` field.
-
-    Used to collapse description_en/description_pl (meals, liquids) and
-    dish_name_en/dish_name_pl (recipes) into ``"<en>\\n<pl>"`` for DB storage.
-    Preserves the original split fields for callers that want them.
-    """
+    """Combine ``<en_field>`` + ``<pl_field>`` into a single ``<key>`` field."""
     en_val = (result.get(en) or "").strip()
     pl_val = (result.get(pl) or "").strip()
     if en_val and pl_val:
@@ -307,6 +255,11 @@ def _combine_recipe(result: dict) -> dict:
     return _combine_bilingual(result, key="dish_name", en="dish_name_en", pl="dish_name_pl")
 
 
+# ---------------------------------------------------------------------------
+# Meal analysis
+# ---------------------------------------------------------------------------
+
+
 async def analyze_meal(
     description: str,
     image_base64: str | None = None,
@@ -320,6 +273,9 @@ async def analyze_meal(
     Raises ``VisionNotSupportedError`` when the model cannot handle images.
     Raises ``LLMParseError`` when the model fails to return valid JSON.
     """
+    from bot.services.agent_runner import load_agent
+    agent = load_agent("bot/modules/calories/agents/meal_analyzer.md")
+
     if image_base64 is not None:
         hint = (description or "").strip()
         if hint and hint.lower() != "analyze this meal":
@@ -342,7 +298,7 @@ async def analyze_meal(
         user_content = description
 
     messages = [
-        {"role": "system", "content": _MEAL_SYSTEM},
+        {"role": "system", "content": agent.system_prompt},
         {"role": "user", "content": user_content},
     ]
 
@@ -375,8 +331,11 @@ async def analyze_liquid(
     Returns dict with keys: amount_ml, calories, protein_g, carbs_g, fat_g, description.
     Raises ``LLMParseError`` when the model fails to return valid JSON.
     """
+    from bot.services.agent_runner import load_agent
+    agent = load_agent("bot/modules/calories/agents/liquid_analyzer.md")
+
     messages = [
-        {"role": "system", "content": _LIQUID_SYSTEM},
+        {"role": "system", "content": agent.system_prompt},
         {"role": "user", "content": description},
     ]
     return await _call_and_parse_json(
@@ -400,12 +359,15 @@ async def analyze_recipe(
 
     Raises ``LLMParseError`` when the model fails to return valid JSON.
     """
+    from bot.services.agent_runner import load_agent
+    agent = load_agent("bot/modules/calories/agents/recipe_analyzer.md")
+
     user_text = recipe_text
     if servings is not None:
         user_text += f"\n\nServings: {servings}"
 
     messages = [
-        {"role": "system", "content": _RECIPE_SYSTEM},
+        {"role": "system", "content": agent.system_prompt},
         {"role": "user", "content": user_text},
     ]
     return await _call_and_parse_json(
@@ -421,23 +383,6 @@ async def analyze_recipe(
 # ---------------------------------------------------------------------------
 # Daily nutrition review
 # ---------------------------------------------------------------------------
-
-_REVIEW_SYSTEM = (
-    "You are a nutrition coach reviewing one day of eating and drinking for a user. "
-    "You receive the full day's logged data (meals, drinks, totals vs. goal, hydration, "
-    "supplement compliance). Produce a short, warm but candid daily review. "
-    "Structure the review with exactly these three sections, in this exact order and with "
-    "these exact emoji headers on their own lines:\n"
-    "\u2705 Wins\n"
-    "\u26a0\ufe0f Concerns\n"
-    "\u27a1\ufe0f Tomorrow\n"
-    "Under each header, write 2\u20134 short bullet points starting with '- '. "
-    "Every bullet must be bilingual in the form '<English> / <Polish>' (slash-separated, "
-    "one line per bullet). Keep bullets concrete and grounded in the data provided \u2014 "
-    "cite calories, macros, ml, or specific items rather than generic advice. "
-    "Do not invent data that was not provided. If the day had no food logged, say so plainly. "
-    "Do NOT use markdown fences, headers, or bold; return plain text only."
-)
 
 
 def _format_review_payload(
@@ -474,12 +419,12 @@ def _format_review_payload(
     lines.append("")
     lines.append("Drinks:")
     if liquids:
-        for l in liquids:
-            drunk = l.get("drunk_at", "")
+        for liq in liquids:
+            drunk = liq.get("drunk_at", "")
             t = str(drunk)[11:16] if len(str(drunk)) >= 16 else str(drunk)
             lines.append(
-                f"- {t} {l.get('description', '')} ({l.get('amount_ml', 0)}ml) \u2014 "
-                f"{l.get('calories', 0)} kcal"
+                f"- {t} {liq.get('description', '')} ({liq.get('amount_ml', 0)}ml) \u2014 "
+                f"{liq.get('calories', 0)} kcal"
             )
     else:
         lines.append("- (none logged)")
@@ -528,32 +473,36 @@ async def review_day(
     Returns the review text (plain, no JSON). Raised exceptions propagate so
     the caller can decide how to surface errors to the user.
     """
-    if client_override is not None:
-        client, model = client_override, model_override
-    else:
-        client, model = get_llm_client(model_override=model_override)
+    from bot.services.agent_runner import load_agent, run_agent
+
+    agent = load_agent("bot/modules/calories/agents/day_reviewer.md")
 
     payload = _format_review_payload(
         profile_name, review_date, meals, liquids, totals, goal, hydration_ml,
         supplements_scheduled or [], supplements_taken_names or [],
     )
 
-    messages: list[dict] = [
-        {"role": "system", "content": _REVIEW_SYSTEM},
-        {"role": "user", "content": payload},
-    ]
+    logger.debug("review_day: profile=%s date=%s", profile_name, review_date)
 
-    logger.debug("review_day: model=%s profile=%s date=%s", model, profile_name, review_date)
+    if client_override is not None:
+        # Compare-mode: caller supplies a specific client+model
+        full_messages = [
+            {"role": "system", "content": agent.system_prompt},
+            {"role": "user", "content": payload},
+        ]
+        response = await client_override.chat.completions.create(
+            model=model_override,
+            messages=full_messages,
+            temperature=0.5,
+        )
+        return (response.choices[0].message.content or "").strip()
 
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages,
+    # Normal path: use agent runner (respects agent's model spec + global /model)
+    return await run_agent(
+        agent,
+        [{"role": "user", "content": payload}],
         temperature=0.5,
     )
-
-    content = (response.choices[0].message.content or "").strip()
-    logger.debug("review_day raw response: %s", content)
-    return content
 
 
 # ---------------------------------------------------------------------------
