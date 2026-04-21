@@ -5,9 +5,23 @@ Enable with:  modules.invoices.enabled: true  in config.yaml.
 """
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 from bot.config import get_config
 from bot.modules.invoices.handlers.invoices import COMMANDS as _INV_COMMANDS
 from bot.modules.invoices.handlers.invoices import register as _reg_invoices
+
+logger = logging.getLogger(__name__)
+
+
+async def _cleanup_stale_pending() -> None:
+    from bot.services import db
+    paths = await db.cleanup_stale_pending_invoices()
+    for p in paths:
+        Path(p).unlink(missing_ok=True)
+    if paths:
+        logger.info("Cleaned up %d stale pending invoice(s)", len(paths))
 
 
 class InvoicesModule:
@@ -21,7 +35,14 @@ class InvoicesModule:
         _reg_invoices(app)
 
     def register_scheduled(self, scheduler, bot) -> None:
-        pass  # no scheduled jobs yet
+        from datetime import datetime, timedelta
+        from apscheduler.triggers.date import DateTrigger
+        scheduler.add_job(
+            _cleanup_stale_pending,
+            trigger=DateTrigger(run_date=datetime.now() + timedelta(seconds=5)),
+            id="invoice_pending_cleanup",
+            replace_existing=True,
+        )
 
 
 module = InvoicesModule()

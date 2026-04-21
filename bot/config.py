@@ -46,6 +46,8 @@ class StorageConfig:
     photos_dir: str
     piano_recordings_dir: str
     invoices_dir: str
+    invoice_catalog_dir: str
+    gmail_attachments_dir: str
 
 
 @dataclass
@@ -74,10 +76,19 @@ class InvoicesModuleConfig:
 
 
 @dataclass
+class GmailModuleConfig:
+    enabled: bool
+    check_interval_minutes: int
+    max_results: int
+    label: str
+
+
+@dataclass
 class ModulesConfig:
     calories: CaloriesModuleConfig
     piano: PianoModuleConfig
     invoices: InvoicesModuleConfig
+    gmail: GmailModuleConfig
 
 
 @dataclass
@@ -116,6 +127,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     cal_sec = mod_sec.get("calories", {})
     pia_sec = mod_sec.get("piano", {})
     inv_sec = mod_sec.get("invoices", {})
+    gml_sec = mod_sec.get("gmail", {})
 
     debug = (
         os.getenv("DEBUG", "").strip().lower() in ("1", "true", "yes", "on", "debug")
@@ -171,6 +183,10 @@ def load_config(path: Path | None = None) -> AppConfig:
                 stor_sec.get("piano_recordings_dir", "./data/piano_recordings"),
             ),
             invoices_dir=stor_sec.get("invoices_dir", "./data/invoices"),
+            invoice_catalog_dir=stor_sec.get("invoice_catalog_dir", "./data/invoice_catalog"),
+            gmail_attachments_dir=stor_sec.get(
+                "gmail_attachments_dir", "./data/gmail_attachments"
+            ),
         ),
         modules=ModulesConfig(
             calories=CaloriesModuleConfig(
@@ -184,6 +200,12 @@ def load_config(path: Path | None = None) -> AppConfig:
             ),
             invoices=InvoicesModuleConfig(
                 enabled=inv_sec.get("enabled", False),
+            ),
+            gmail=GmailModuleConfig(
+                enabled=gml_sec.get("enabled", False),
+                check_interval_minutes=gml_sec.get("check_interval_minutes", 5),
+                max_results=gml_sec.get("max_results", 10),
+                label=gml_sec.get("label", "INBOX"),
             ),
         ),
     )

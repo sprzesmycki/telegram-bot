@@ -896,3 +896,183 @@ async def get_all_active_reminders() -> list[dict]:
         "SELECT * FROM reminders WHERE active = TRUE ORDER BY owner_user_id, reminder_time"
     )
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Invoices
+# ---------------------------------------------------------------------------
+
+
+def _load_jsonb(raw) -> list | dict:
+    if raw is None:
+        return []
+    if isinstance(raw, (list, dict)):
+        return raw
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+
+
+def _parse_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _to_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def create_pending_invoice(
+    owner_id: int, tmp_file_path: str, parsed: dict
+) -> int:
+    return await _pool_or_raise().fetchval(
+        """
+        INSERT INTO pending_invoices (owner_user_id, tmp_file_path, parsed)
+        VALUES ($1, $2, $3::jsonb) RETURNING id
+        """,
+        owner_id, tmp_file_path, json.dumps(parsed),
+    )
+
+
+async def get_pending_invoice(pending_id: int, owner_id: int) -> dict | None:
+    row = await _pool_or_raise().fetchrow(
+        "SELECT * FROM pending_invoices WHERE id = $1 AND owner_user_id = $2",
+        pending_id, owner_id,
+    )
+    if not row:
+        return None
+    d = dict(row)
+    d["parsed"] = _load_jsonb(d.get("parsed"))
+    return d
+
+
+async def delete_pending_invoice(pending_id: int) -> None:
+    await _pool_or_raise().execute(
+        "DELETE FROM pending_invoices WHERE id = $1", pending_id
+    )
+
+
+async def cleanup_stale_pending_invoices(max_age_hours: int = 24) -> list[str]:
+    """Delete pending_invoices older than max_age_hours. Returns tmp file paths to remove."""
+    rows = await _pool_or_raise().fetch(
+        """
+        DELETE FROM pending_invoices
+        WHERE created_at < NOW() - ($1 || ' hours')::INTERVAL
+        RETURNING tmp_file_path
+        """,
+        str(max_age_hours),
+    )
+    return [r["tmp_file_path"] for r in rows]
+
+
+async def log_invoice(
+    owner_id: int,
+    parsed: dict,
+    file_path: str,
+    source: str = "manual",
+    gmail_message_id: str | None = None,
+    original_filename: str | None = None,
+) -> int:
+    return await _pool_or_raise().fetchval(
+        """
+        INSERT INTO invoices (
+            owner_user_id, vendor, invoice_number, issue_date, due_date,
+            currency, subtotal, tax, total, category, subcategory, recurring,
+            line_items, notes, source, gmail_message_id, file_path, original_filename
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18)
+        RETURNING id
+        """,
+        owner_id,
+        parsed.get("vendor"),
+        parsed.get("invoice_number"),
+        _parse_date(parsed.get("issue_date")),
+        _parse_date(parsed.get("due_date")),
+        parsed.get("currency"),
+        _to_float(parsed.get("subtotal")),
+        _to_float(parsed.get("tax")),
+        _to_float(parsed.get("total")),
+        parsed.get("category"),
+        parsed.get("subcategory"),
+        bool(parsed.get("recurring", False)),
+        json.dumps(parsed.get("line_items") or []),
+        parsed.get("notes"),
+        source,
+        gmail_message_id,
+        file_path,
+        original_filename,
+    )
+
+
+async def find_duplicate_invoice(
+    owner_id: int,
+    invoice_number: str | None,
+    original_filename: str | None,
+) -> dict | None:
+    """Return an existing invoice matching invoice_number or original_filename, or None."""
+    if not invoice_number and not original_filename:
+        return None
+
+    conditions: list[str] = []
+    params: list = [owner_id]
+
+    if invoice_number:
+        params.append(invoice_number)
+        conditions.append(f"invoice_number = ${len(params)}")
+    if original_filename:
+        params.append(original_filename)
+        conditions.append(f"original_filename = ${len(params)}")
+
+    sql = (
+        f"SELECT * FROM invoices WHERE owner_user_id = $1 "
+        f"AND ({' OR '.join(conditions)}) LIMIT 1"
+    )
+    row = await _pool_or_raise().fetchrow(sql, *params)
+    if not row:
+        return None
+    d = dict(row)
+    d["line_items"] = _load_jsonb(d.get("line_items"))
+    return d
+
+
+async def get_processed_filenames(owner_id: int) -> set[str]:
+    rows = await _pool_or_raise().fetch(
+        "SELECT original_filename FROM invoices WHERE owner_user_id = $1 AND original_filename IS NOT NULL",
+        owner_id,
+    )
+    return {row["original_filename"] for row in rows}
+
+
+async def list_invoices(owner_id: int, limit: int = 10) -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM invoices
+        WHERE owner_user_id = $1
+        ORDER BY created_at DESC
+        LIMIT $2
+        """,
+        owner_id, limit,
+    )
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["line_items"] = _load_jsonb(d.get("line_items"))
+        result.append(d)
+    return result
+
+
+async def delete_invoice(owner_id: int, invoice_id: int) -> bool:
+    row = await _pool_or_raise().fetchrow(
+        "DELETE FROM invoices WHERE id = $1 AND owner_user_id = $2 RETURNING id",
+        invoice_id, owner_id,
+    )
+    return row is not None
