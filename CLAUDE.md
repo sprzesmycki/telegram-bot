@@ -45,7 +45,7 @@ When you add, remove, or rename a user-facing feature (a command, a flow, a sche
 
 `_env(key, yaml_fallback)` in `bot/config.py` applies `.env` overlays for legacy env vars — this lets existing deployments keep working without touching `config.yaml`. Don't add new env-var config; add it to `config.yaml` instead.
 
-Key dataclass tree: `AppConfig → LLMConfig, StorageConfig, LoggingConfig, ModulesConfig → CaloriesModuleConfig, PianoModuleConfig, InvoicesModuleConfig`. All module-level code reads config via `get_config()` — never via `os.getenv()` for anything other than secrets.
+Key dataclass tree: `AppConfig → LLMConfig, StorageConfig, LoggingConfig, ModulesConfig → CaloriesModuleConfig, PianoModuleConfig, InvoicesModuleConfig, GmailModuleConfig`. All module-level code reads config via `get_config()` — never via `os.getenv()` for anything other than secrets.
 
 ### Module system (bot/modules/)
 
@@ -55,7 +55,7 @@ Features are organised as optional modules in `bot/modules/`. Each module direct
 - `register(app)` — attaches handlers to the `Application`
 - `register_scheduled(scheduler, bot)` — registers cron jobs owned by this module
 
-`bot/modules/__init__.py::load_enabled_modules()` always loads `CoreModule` (profiles, reminders, model) and conditionally loads `PianoModule`, `CaloriesModule`, and `InvoicesModule` based on their `enabled` flags. `main.py` calls `load_enabled_modules()` and loops over the result — no explicit handler imports in `main.py`.
+`bot/modules/__init__.py::load_enabled_modules()` always loads `CoreModule` (profiles, reminders, model) and conditionally loads `PianoModule`, `CaloriesModule`, `InvoicesModule`, and `GmailModule` (in that order) based on their `enabled` flags. `main.py` calls `load_enabled_modules()` and loops over the result — no explicit handler imports in `main.py`.
 
 Module order matters for text-handler dispatch: piano is registered before calories so `piano_text_dispatch` gets first crack at plain-text messages (see Piano section).
 
@@ -140,6 +140,8 @@ The first `/profile add <Name>` (when `Name != "Me"`) auto-creates a `Me` profil
 Scheduled cron jobs for features are registered by each module's `register_scheduled(scheduler, bot)` call in `post_init`:
 - **Calories** (`bot/modules/calories/scheduled.py`): `daily_summary` (at `modules.calories.daily_summary_time`) and `daily_review` (at `modules.calories.daily_review_time`). Both iterate distinct profile owners and skip profiles with nothing logged.
 - **Piano** (`bot/modules/piano/scheduled.py`): `piano_checkin` (at `modules.piano.checkin_time`). Iterates piano owners and skips days already logged.
+- **Invoices** (`bot/modules/invoices/__init__.py`): one-shot `invoice_pending_cleanup` fires 5 s after startup (via `DateTrigger`) to delete stale `pending_invoices` rows and remove their tmp files.
+- **Gmail** (`bot/modules/gmail/scheduled.py`): `gmail_check` polls for new unread mail every `modules.gmail.check_interval_minutes` minutes (IntervalTrigger). Compares against a module-level `_last_seen_count`; when count rises it fetches the new messages and broadcasts to all profile owners.
 
 All "iterate distinct owners" paths share the `db.get_distinct_profile_owner_ids()` helper — don't write raw `SELECT DISTINCT owner_user_id` queries in the scheduler.
 
@@ -162,6 +164,32 @@ Voice/audio pipeline: `MessageHandler(filters.VOICE | filters.AUDIO, piano_voice
 Text-handler dispatch: `/piano log` with no args stashes `pending_piano_log=True` and prompts "reply like `30 min Chopin, scales`". The next plain-text message triggers `calories.refine_handler`, which calls `piano.piano_text_dispatch` **first** (behind a config guard — only if `get_config().modules.piano.enabled`); if that returns `True`, the calorie refine path is skipped. This is why piano is registered before calories in `load_enabled_modules()`.
 
 Streak rules (`bot/modules/piano/services/streaks.py::compute_and_update_streak`): same-day re-log is idempotent; `delta_days == 1` increments; `delta_days > 1` resets to 1; `delta_days <= 0` (backdated) keeps current. Always updates `longest = max(longest, current)`.
+
+### Invoices module
+Invoices are **owner-scoped**. The module is in `bot/modules/invoices/`.
+
+Flow: receive file (photo with `/invoice` caption, or any PDF document) → `analyze_invoice` (local `gemma4:26b` via `bot/modules/invoices/agents/invoice_reader.md`) → `pending_invoices` row + preview card → ✅ Save / ❌ Discard. On confirm, `find_duplicate_invoice` checks by `invoice_number` + original filename; if a duplicate exists the user gets a Replace / Skip choice before the row is written to `invoices`.
+
+Commands:
+- `/invoice` — usage help
+- `/invoices [N]` — list last N saved invoices (default 10)
+- `/invoices month [YYYY-MM]` — monthly summary: totals, by-category breakdown, recurring vs one-time split, top vendors, month-over-month delta
+- `/invoices avg [N]` — N-month average effective cost (default 6), per-category breakdown, month-by-month table
+- `/scan [dir]` — scan `storage.invoice_catalog_dir` (or an explicit path) for unprocessed PDF/image files, present each one for confirm/discard in sequence
+- `/scan_stop` — abort an in-progress catalog scan
+
+**Billing period**: `invoice_reader.md` extracts `billing_period_months` (1, 3, or 12). `summary.py::_effective()` divides the total by this to compute a per-month effective cost used by `/invoices month` and `/invoices avg`.
+
+**Gmail integration**: the Gmail handler injects "Process as invoice" buttons for PDF attachments (`inv_email:<key>` callback) and for Apple email-body invoices (`inv_body:<email_id>` callback). If `modules.gmail.auto_process_invoices: true`, Apple invoices are processed automatically on `/emails` without a confirm dialog — a sequential queue drains one item at a time and sends a batch summary on completion.
+
+### Gmail module
+`bot/modules/gmail/` — optional (`modules.gmail.enabled`). Requires OAuth 2.0; run `scripts/gmail_auth.py` once to get `credentials.json`; set `GMAIL_CREDENTIALS_PATH` in `.env`.
+
+Config keys (`GmailModuleConfig`): `enabled`, `check_interval_minutes`, `max_results`, `label` (Gmail label to filter), `auto_process_invoices` (boolean).
+
+Commands: `/emails [N]` — fetch up to N unread messages (default `max_results`). Each email is displayed with a "Read more" button if the body is truncated. If the invoices module is enabled, PDF attachments get an "Invoice: <filename>" button and Apple body-invoices get a "Parse Apple invoice" button (or are auto-queued if `auto_process_invoices` is on).
+
+Scheduled: `gmail_check` polls every `check_interval_minutes` using an `IntervalTrigger`. It compares the current unread count against `_last_seen_count`; if count grew it fetches the delta and sends each new email to all profile owners.
 
 ### Logging
 `bot/utils/logging_config.setup_logging()` must be called **before** any project imports that create module-level loggers. It reads `get_config().logging` for level, file path, and debug flag. It wires a stdout `StreamHandler` and a `RotatingFileHandler` at `./data/logs/bot.log` (5 MB × 10 files). Setting `logging.debug: true` in `config.yaml` (or `DEBUG=1` in env) flips both the root level and unmutes the noisy library loggers listed in `_NOISY_LOGGERS`.
