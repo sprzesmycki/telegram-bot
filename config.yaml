@@ -42,6 +42,8 @@ modules:
       checkin_time: "19:00"
   invoices:
     enabled: true
+  subscriptions:
+    enabled: true
   gmail:
     enabled: true
     check_interval_minutes: 60

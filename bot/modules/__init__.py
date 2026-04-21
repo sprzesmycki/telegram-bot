@@ -46,6 +46,13 @@ def load_enabled_modules():
     else:
         logger.info("Module disabled: supplements")
 
+    if cfg.modules.subscriptions.enabled:
+        from bot.modules.subscriptions import module as subscriptions_module
+        modules.append(subscriptions_module)
+        logger.info("Module loaded: subscriptions")
+    else:
+        logger.info("Module disabled: subscriptions")
+
     if cfg.modules.invoices.enabled:
         from bot.modules.invoices import module as invoices_module
         modules.append(invoices_module)

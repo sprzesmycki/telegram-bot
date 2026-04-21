@@ -82,6 +82,8 @@ modules:
       checkin_time: "19:00"
   invoices:
     enabled: true
+  subscriptions:
+    enabled: true
   gmail:
     enabled: false
     check_interval_minutes: 5
@@ -123,9 +125,15 @@ Disabling a module removes its commands from the bot and stops its scheduled job
 | _(photo with caption `/invoice`)_ | Analyse invoice photo; shows preview card with Save / Discard |
 | _(PDF document)_ | Analyse PDF invoice; shows preview card with Save / Discard |
 | `/invoice` | Show invoice module usage |
-| `/invoices [N]` | List last N saved invoices (default 10) |
-| `/invoices month [YYYY-MM]` | Monthly expense summary with category breakdown and amortized costs (default: current month) |
-| `/invoices avg [N]` | Average monthly cost over last N months (default 6); months with no invoices count as zero |
+| `/invoices [N]` | List last N saved invoices (alias for `/payments invoices`) |
+| `/payments [invoices\|subs\|all] [N]` | List recent payments (default: all; shows invoices + subscriptions) |
+| `/payments month [YYYY-MM] [invoices\|subs\|all]` | Monthly expense summary with category breakdown and amortized costs (default: all, current month) |
+| `/payments avg [N] [invoices\|subs\|all]` | Average monthly cost over last N months (default 6) |
+| `/sub add <name> <amount> [monthly\|quarterly\|yearly]` | Add a subscription (e.g. `/sub add Netflix 45.99`) |
+| `/sub list [all]` | List active subscriptions (pass `all` to include inactive) |
+| `/sub update <id> <new_amount>` | Update subscription price from today (deactivates old, creates new) |
+| `/sub disable <id>` | Deactivate a subscription |
+| `/sub enable <id>` | Re-enable a deactivated subscription |
 | `/scan [dir]` | Process all unprocessed files in catalog dir one by one |
 | `/emails [N]` | Fetch up to N (default 10) unread Gmail messages; marks them as read |
 | `/model [openrouter\|local\|custom] [model-name]` | View or switch LLM provider |
@@ -361,7 +369,10 @@ bot/
       scheduled.py — Cron jobs (piano checkin)
     invoices/
       agents/     — LLM agent .md files (invoice_reader — local:gemma4:26b)
-      handlers/   — /invoice help, /invoices list, photo + PDF handlers, confirm/discard callbacks
+      handlers/   — /invoice help, /invoices list, /payments, photo + PDF handlers, confirm/discard callbacks
+      services/   — summary.py: aggregation helpers for invoices + subscriptions
+    subscriptions/
+      handlers/   — /sub command (add/list/update/disable/enable)
     gmail/
       handlers/   — /emails command + read-more callback
       scheduled.py — Interval job: poll for new mail, notify owners

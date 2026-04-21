@@ -738,42 +738,71 @@ def _month_name(year: int, month: int) -> str:
     return f"{calendar.month_abbr[month]} {year}"
 
 
-async def _invoices_month(update: Update, owner_id: int, args: list[str]) -> None:
+_PAYMENT_TYPES = {"invoices", "subs", "subscriptions", "all"}
+
+
+def _extract_type(args: list[str]) -> tuple[str, list[str]]:
+    """Pop the payment type keyword from args if present. Returns (type, remaining_args)."""
+    for i, a in enumerate(args):
+        if a in _PAYMENT_TYPES:
+            t = "subs" if a == "subscriptions" else a
+            return t, args[:i] + args[i + 1 :]
+    return "all", args
+
+
+def _subs_enabled() -> bool:
+    return get_config().modules.subscriptions.enabled
+
+
+async def _payments_month(update: Update, owner_id: int, args: list[str], ptype: str = "all") -> None:
     today = _date.today()
     year, month = today.year, today.month
     if args:
         try:
             year, month = map(int, args[0].split("-"))
         except (ValueError, AttributeError):
-            await update.message.reply_text("❌ Use YYYY-MM format, e.g. /invoices month 2026-03")
+            await update.message.reply_text("❌ Use YYYY-MM format, e.g. /payments month 2026-03")
             return
 
-    invoices = await db.get_invoices_for_month(owner_id, year, month)
-
-    # Month-over-month: fetch previous month
     prev_month = month - 1 or 12
     prev_year = year if month > 1 else year - 1
-    prev_invoices = await db.get_invoices_for_month(owner_id, prev_year, prev_month)
-
     month_label = _month_name(year, month)
 
-    if not invoices:
+    include_invoices = ptype in ("invoices", "all")
+    include_subs = ptype in ("subs", "all") and _subs_enabled()
+
+    invoices = await db.get_invoices_for_month(owner_id, year, month) if include_invoices else []
+    subs = await db.get_subscriptions_active_in_month(owner_id, year, month) if include_subs else []
+
+    prev_invoices = await db.get_invoices_for_month(owner_id, prev_year, prev_month) if include_invoices else []
+    prev_subs = await db.get_subscriptions_active_in_month(owner_id, prev_year, prev_month) if include_subs else []
+
+    if not invoices and not subs:
         prev_label = _month_name(prev_year, prev_month)
+        prev_count = len(prev_invoices) + len(prev_subs)
         await update.message.reply_text(
-            f"📊 Summary: {month_label}\n\nNo invoices found with issue_date in this month.\n"
-            f"(Previous month {prev_label}: {len(prev_invoices)} invoice(s))"
+            f"📊 Summary: {month_label}\n\nNo payments found for this month.\n"
+            f"(Previous month {prev_label}: {prev_count} entries)"
         )
         return
 
-    s = build_month_summary(invoices)
+    s = build_month_summary(invoices, subscriptions=subs)
     currencies = {inv.get("currency") for inv in invoices if inv.get("currency")}
-    cur = next(iter(currencies), "")
+    sub_currencies = {sub.get("currency") for sub in subs if sub.get("currency")}
+    cur = next(iter(currencies | sub_currencies), "")
 
     lines = [f"📊 Summary: {month_label}\n"]
     lines.append(f"💰 Total paid:             {_fmt_currency(s['total_actual'], cur)}")
     if s["total_effective"] != s["total_actual"]:
         lines.append(f"📈 Effective monthly cost: {_fmt_currency(s['total_effective'], cur)}")
-    lines.append(f"📄 Invoices: {s['invoice_count']}")
+
+    count_parts = []
+    if include_invoices:
+        count_parts.append(f"📄 {s['invoice_count']} invoice(s)")
+    if include_subs:
+        count_parts.append(f"🔔 {s['subscription_count']} subscription(s)")
+    if count_parts:
+        lines.append("  ".join(count_parts))
 
     if s["by_category"]:
         lines.append("\n📂 By category:")
@@ -786,60 +815,68 @@ async def _invoices_month(update: Update, owner_id: int, args: list[str]) -> Non
     if s["recurring"]["count"] or s["one_time"]["count"]:
         lines.append("")
         if s["recurring"]["count"]:
-            lines.append(f"🔄 Recurring: {_fmt_currency(s['recurring']['actual'], cur)} ({s['recurring']['count']} invoice(s))")
+            lines.append(f"🔄 Recurring: {_fmt_currency(s['recurring']['actual'], cur)} ({s['recurring']['count']})")
         if s["one_time"]["count"]:
-            lines.append(f"⚡ One-time:  {_fmt_currency(s['one_time']['actual'], cur)} ({s['one_time']['count']} invoice(s))")
+            lines.append(f"⚡ One-time:  {_fmt_currency(s['one_time']['actual'], cur)} ({s['one_time']['count']})")
 
     if s["top_vendors"]:
-        lines.append("\n🏢 Top vendors:")
+        lines.append("\n🏢 Top entries:")
         for i, v in enumerate(s["top_vendors"], 1):
             lines.append(f"  {i}. {v['vendor']} — {_fmt_currency(v['total'], cur)}")
 
-    # Month-over-month
-    if prev_invoices:
-        prev_s = build_month_summary(prev_invoices)
+    prev_s = build_month_summary(prev_invoices, subscriptions=prev_subs)
+    if prev_s["total_actual"]:
         prev_label = _month_name(prev_year, prev_month)
-        if prev_s["total_actual"]:
-            change_pct = (s["total_actual"] - prev_s["total_actual"]) / prev_s["total_actual"] * 100
-            arrow = "+" if change_pct >= 0 else ""
-            lines.append(f"\n📉 vs {prev_label}: {arrow}{change_pct:.0f}% actual")
+        change_pct = (s["total_actual"] - prev_s["total_actual"]) / prev_s["total_actual"] * 100
+        arrow = "+" if change_pct >= 0 else ""
+        lines.append(f"\n📉 vs {prev_label}: {arrow}{change_pct:.0f}%")
 
-    # Individual invoice list
-    lines.append("\n📋 Invoices:")
-    for i, inv in enumerate(invoices, 1):
-        vendor = inv.get("vendor") or "Unknown"
-        total = inv.get("total")
-        currency = inv.get("currency") or ""
-        cat = inv.get("category") or "—"
-        sub = inv.get("subcategory")
-        cat_str = f"{cat} › {sub}" if sub else cat
-        recurring_mark = " 🔁" if inv.get("recurring") else ""
-        notes = inv.get("notes") or ""
-        date_str = str(inv.get("issue_date") or "—")[:10]
-        lines.append(
-            f"\n{i}. {vendor}{recurring_mark}\n"
-            f"   Date:     {date_str}\n"
-            f"   Amount:   {_fmt_currency(float(total or 0), currency)}\n"
-            f"   Category: {cat_str}"
-            + (f"\n   Notes:    {notes}" if notes else "")
-        )
+    if invoices:
+        lines.append("\n📋 Invoices:")
+        for i, inv in enumerate(invoices, 1):
+            vendor = inv.get("vendor") or "Unknown"
+            total = inv.get("total")
+            currency = inv.get("currency") or ""
+            cat = inv.get("category") or "—"
+            sub = inv.get("subcategory")
+            cat_str = f"{cat} › {sub}" if sub else cat
+            recurring_mark = " 🔁" if inv.get("recurring") else ""
+            notes = inv.get("notes") or ""
+            date_str = str(inv.get("issue_date") or "—")[:10]
+            lines.append(
+                f"\n{i}. {vendor}{recurring_mark}\n"
+                f"   Date:     {date_str}\n"
+                f"   Amount:   {_fmt_currency(float(total or 0), currency)}\n"
+                f"   Category: {cat_str}"
+                + (f"\n   Notes:    {notes}" if notes else "")
+            )
+
+    if subs:
+        lines.append("\n🔔 Subscriptions:")
+        for sub in subs:
+            period = sub.get("billing_period_months", 1)
+            eff = float(sub.get("amount", 0)) / (period if period in (1, 3, 12) else 1)
+            currency = sub.get("currency") or "PLN"
+            lines.append(
+                f"  • {sub['name']}  {_fmt_currency(eff, currency)}/mo"
+                + (f"  [{sub.get('category', '')}]" if sub.get("category") else "")
+            )
 
     await update.message.reply_text("\n".join(lines))
 
 
-async def _invoices_avg(update: Update, owner_id: int, args: list[str]) -> None:
+async def _payments_avg(update: Update, owner_id: int, args: list[str], ptype: str = "all") -> None:
     n_months = 6
     if args:
         try:
             n_months = max(1, min(int(args[0]), 24))
         except ValueError:
-            await update.message.reply_text("❌ Provide a number of months, e.g. /invoices avg 3")
+            await update.message.reply_text("❌ Provide a number of months, e.g. /payments avg 3")
             return
 
     today = _date.today()
     end_year, end_month = today.year, today.month
 
-    # start date = first day of the earliest month in range
     start_month = end_month - n_months + 1
     start_year = end_year
     while start_month <= 0:
@@ -847,18 +884,22 @@ async def _invoices_avg(update: Update, owner_id: int, args: list[str]) -> None:
         start_year -= 1
 
     start_date = _date(start_year, start_month, 1)
-    # end_date = first day of month after end_month
     if end_month == 12:
         end_date = _date(end_year + 1, 1, 1)
     else:
         end_date = _date(end_year, end_month + 1, 1)
 
-    invoices = await db.get_invoices_for_range(owner_id, start_date, end_date)
+    include_invoices = ptype in ("invoices", "all")
+    include_subs = ptype in ("subs", "all") and _subs_enabled()
+
+    invoices = await db.get_invoices_for_range(owner_id, start_date, end_date) if include_invoices else []
+    subs = await db.get_subscriptions_active_in_range(owner_id, start_date, end_date) if include_subs else []
 
     currencies = {inv.get("currency") for inv in invoices if inv.get("currency")}
-    cur = next(iter(currencies), "")
+    sub_currencies = {sub.get("currency") for sub in subs if sub.get("currency")}
+    cur = next(iter(currencies | sub_currencies), "")
 
-    a = build_avg_summary(invoices, n_months, end_year, end_month)
+    a = build_avg_summary(invoices, n_months, end_year, end_month, subscriptions=subs)
 
     start_label = _month_name(start_year, start_month)
     end_label = _month_name(end_year, end_month)
@@ -875,7 +916,7 @@ async def _invoices_avg(update: Update, owner_id: int, args: list[str]) -> None:
     for m in a["months"]:
         label = _month_name(m["year"], m["month"])
         if m["count"] == 0:
-            lines.append(f"  {label}: —  (0 invoices)")
+            lines.append(f"  {label}: —")
         else:
             line = f"  {label}: {_fmt_currency(m['actual'], cur)}"
             if m["effective"] != m["actual"]:
@@ -885,18 +926,7 @@ async def _invoices_avg(update: Update, owner_id: int, args: list[str]) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
-async def invoices_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    owner_id = update.effective_user.id
-    args = context.args or []
-
-    if args and args[0] == "month":
-        await _invoices_month(update, owner_id, args[1:])
-        return
-
-    if args and args[0] == "avg":
-        await _invoices_avg(update, owner_id, args[1:])
-        return
-
+async def _payments_list(update: Update, owner_id: int, args: list[str], ptype: str = "all") -> None:
     limit = 10
     if args:
         try:
@@ -904,32 +934,83 @@ async def invoices_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except ValueError:
             pass
 
-    rows = await db.list_invoices(owner_id, limit)
-    if not rows:
+    include_invoices = ptype in ("invoices", "all")
+    include_subs = ptype in ("subs", "all") and _subs_enabled()
+
+    invoice_rows = await db.list_invoices(owner_id, limit) if include_invoices else []
+    sub_rows = await db.list_subscriptions(owner_id, active_only=True) if include_subs else []
+
+    if not invoice_rows and not sub_rows:
         await update.message.reply_text(
-            "📂 No invoices saved yet.\n\n"
-            "Send a PDF or a photo with caption /invoice to add one."
+            "📂 No payments found.\n\n"
+            "Send a PDF or a photo with caption /invoice to add an invoice.\n"
+            "Use /sub add to track subscriptions."
         )
         return
 
-    lines = [f"📂 Last {len(rows)} invoice(s):\n"]
-    for row in rows:
-        date_str = str(row.get("issue_date") or "—")[:10]
-        vendor = row.get("vendor") or "Unknown"
-        total = row.get("total")
-        currency = row.get("currency") or ""
-        cat = row.get("category") or "—"
-        sub = row.get("subcategory")
-        cat_str = f"{cat} › {sub}" if sub else cat
-        recurring_mark = " 🔁" if row.get("recurring") else ""
-        lines.append(f"#{row['id']}  {date_str}  {vendor}  {_fmt_amount(total, currency)}  [{cat_str}]{recurring_mark}")
+    lines = []
+    if invoice_rows:
+        lines.append(f"📄 Last {len(invoice_rows)} invoice(s):\n")
+        for row in invoice_rows:
+            date_str = str(row.get("issue_date") or "—")[:10]
+            vendor = row.get("vendor") or "Unknown"
+            total = row.get("total")
+            currency = row.get("currency") or ""
+            cat = row.get("category") or "—"
+            sub = row.get("subcategory")
+            cat_str = f"{cat} › {sub}" if sub else cat
+            recurring_mark = " 🔁" if row.get("recurring") else ""
+            lines.append(f"#{row['id']}  {date_str}  {vendor}  {_fmt_amount(total, currency)}  [{cat_str}]{recurring_mark}")
+
+    if sub_rows:
+        if lines:
+            lines.append("")
+        lines.append("🔔 Active subscriptions:\n")
+        for row in sub_rows:
+            period = row.get("billing_period_months", 1)
+            eff = float(row.get("amount", 0)) / (period if period in (1, 3, 12) else 1)
+            currency = row.get("currency") or "PLN"
+            period_label = {1: "mo", 3: "q", 12: "yr"}.get(period, f"/{period}mo")
+            lines.append(f"#{row['id']}  {row['name']}  {_fmt_currency(eff, currency)}/{period_label}  [{row.get('category', '')}]")
 
     await update.message.reply_text("\n".join(lines))
 
 
+async def payments_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    owner_id = update.effective_user.id
+    args = context.args or []
+    ptype, remaining = _extract_type(args)
+
+    if remaining and remaining[0] == "month":
+        await _payments_month(update, owner_id, remaining[1:], ptype=ptype)
+        return
+
+    if remaining and remaining[0] == "avg":
+        await _payments_avg(update, owner_id, remaining[1:], ptype=ptype)
+        return
+
+    await _payments_list(update, owner_id, remaining, ptype=ptype)
+
+
+async def invoices_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    owner_id = update.effective_user.id
+    args = context.args or []
+
+    if args and args[0] == "month":
+        await _payments_month(update, owner_id, args[1:], ptype="invoices")
+        return
+
+    if args and args[0] == "avg":
+        await _payments_avg(update, owner_id, args[1:], ptype="invoices")
+        return
+
+    await _payments_list(update, owner_id, args, ptype="invoices")
+
+
 COMMANDS: list[tuple[str, str]] = [
     ("invoice", "Invoice help and usage"),
-    ("invoices", "List saved invoices"),
+    ("invoices", "List invoices (alias for /payments invoices)"),
+    ("payments", "Payment summaries: invoices, subs, or all"),
     ("scan", "Scan invoice catalog directory"),
     ("scan_stop", "Stop current catalog scan"),
 ]
@@ -954,5 +1035,6 @@ def register(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(email_body_callback, pattern=r"^inv_body:"))
     app.add_handler(CommandHandler("invoice", invoice_help_cmd))
     app.add_handler(CommandHandler("invoices", invoices_cmd))
+    app.add_handler(CommandHandler("payments", payments_cmd))
     app.add_handler(CommandHandler("scan", scan_cmd))
     app.add_handler(CommandHandler("scan_stop", scan_stop_cmd))
