@@ -122,7 +122,7 @@ async def emails_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     inv_key += 1
 
             if inv_rows:
-                existing = kb.inline_keyboard if kb else []
+                existing = list(kb.inline_keyboard) if kb else []
                 kb = InlineKeyboardMarkup(existing + inv_rows)
 
         context.user_data["gmail_inv_next_key"] = inv_key

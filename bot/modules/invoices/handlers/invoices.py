@@ -176,11 +176,6 @@ async def _analyse_and_preview(
         await status_msg.edit_text("⚠️ This doesn't look like an invoice.")
         return
 
-    if not result:
-        tmp_path.unlink(missing_ok=True)
-        await status_msg.edit_text("❌ Could not parse LLM response. Please try again.")
-        return
-
     result["_meta"] = {"source": "manual", "original_filename": original_filename}
     pending_id = await db.create_pending_invoice(owner_id, str(tmp_path), result)
 
@@ -404,10 +399,6 @@ async def email_attachment_callback(update: Update, context: ContextTypes.DEFAUL
 
     if result.get("error") == "not_an_invoice":
         await status_msg.edit_text("⚠️ This doesn't look like an invoice.")
-        return
-
-    if not result:
-        await status_msg.edit_text("❌ Could not parse LLM response. Please try again.")
         return
 
     result["_meta"] = {
