@@ -103,12 +103,12 @@ def register_supplement_reminder(
 # ---------------------------------------------------------------------------
 
 
-def schedule_snooze_reminder(
+def schedule_snooze_supplement(
     scheduler: AsyncIOScheduler, bot, supplement: dict, owner_id: int,
 ) -> None:
     """Schedule a one-shot reminder 1 hour from now for *supplement*."""
     run_at = datetime.now() + timedelta(hours=1)
-    job_id = f"snooze_{supplement['id']}_{owner_id}"
+    job_id = f"snooze_sup_{supplement['id']}_{owner_id}"
 
     async def _send_snooze() -> None:
         await send_supplement_reminder(bot, supplement, owner_id)

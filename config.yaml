@@ -30,7 +30,7 @@ storage:
 
 modules:
   calories:
-    enabled: false
+    enabled: true
     schedules:
       daily_summary_time: "21:00"
       daily_review_time: "22:00"
