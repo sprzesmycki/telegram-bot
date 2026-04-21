@@ -577,6 +577,38 @@ async def log_piano_session(
     )
 
 
+async def start_piano_session(owner_id: int) -> datetime:
+    """Start a new active practice session, overwriting any existing one."""
+    now = datetime.now(WARSAW)
+    await _pool_or_raise().execute(
+        """
+        INSERT INTO piano_active_sessions (owner_user_id, started_at)
+        VALUES ($1, $2)
+        ON CONFLICT (owner_user_id) DO UPDATE SET started_at = EXCLUDED.started_at
+        """,
+        owner_id, now,
+    )
+    return now
+
+
+async def get_active_piano_session(owner_id: int) -> datetime | None:
+    """Return the start time of the current active session, or None."""
+    row = await _pool_or_raise().fetchrow(
+        "SELECT started_at FROM piano_active_sessions WHERE owner_user_id = $1",
+        owner_id,
+    )
+    return row["started_at"] if row else None
+
+
+async def clear_active_piano_session(owner_id: int) -> bool:
+    """Remove the active session record for this user."""
+    row = await _pool_or_raise().fetchrow(
+        "DELETE FROM piano_active_sessions WHERE owner_user_id = $1 RETURNING owner_user_id",
+        owner_id,
+    )
+    return row is not None
+
+
 def _session_row_to_dict(row: asyncpg.Record) -> dict:
     data = dict(row)
     data["pieces_practiced"] = _load_pieces_json(data.get("pieces_practiced"))

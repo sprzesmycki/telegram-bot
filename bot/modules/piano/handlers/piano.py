@@ -19,7 +19,9 @@ USAGE = (
     "\U0001f3b9 Piano practice coach\n"
     "Usage:\n"
     "/piano                              — show summary & streak\n"
-    "/piano log [N min] [piece1, piece2] — log today's practice\n"
+    "/piano session start                — start a practice timer\n"
+    "/piano session stop [pieces]        — stop timer and log\n"
+    "/piano log [N] [piece1, piece2]     — log today's practice (N in mins)\n"
     "/piano checkin [note]               — coaching check-in\n"
     "/piano pieces                       — list your repertoire\n"
     "/piano piece add <title> [by <composer>]\n"
@@ -35,6 +37,7 @@ _DURATION_RE = re.compile(
     r"(\d+)\s*(?:min(?:ute)?s?|m)\b",
     re.IGNORECASE,
 )
+_BARE_DURATION_RE = re.compile(r"^(\d+)(?:\s+|$)", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +51,7 @@ def _parse_log_body(body: str) -> tuple[int | None, list[str], str | None]:
     Formats accepted:
       ``30 min Chopin Nocturne, scales``
       ``45 minutes``
+      ``30 Chopin Nocturne`` (leading bare number as minutes)
       ``Chopin Nocturne`` (no duration)
     Anything after a ``--`` separator becomes notes.
     """
@@ -62,6 +66,7 @@ def _parse_log_body(body: str) -> tuple[int | None, list[str], str | None]:
         notes = trailing.strip() or None
 
     duration: int | None = None
+    # 1. Try explicit duration (e.g. "30 min")
     match = _DURATION_RE.search(text)
     if match:
         try:
@@ -69,6 +74,15 @@ def _parse_log_body(body: str) -> tuple[int | None, list[str], str | None]:
         except ValueError:
             duration = None
         text = (text[: match.start()] + text[match.end():]).strip(" ,.-\t")
+    else:
+        # 2. Try bare number at the very start
+        match = _BARE_DURATION_RE.search(text)
+        if match:
+            try:
+                duration = int(match.group(1))
+            except ValueError:
+                duration = None
+            text = text[match.end():].strip(" ,.-\t")
 
     pieces: list[str] = []
     if text:
@@ -107,6 +121,8 @@ async def piano_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if sub == "log":
         await _piano_log(update, context, owner_id, args, text)
+    elif sub == "session":
+        await _piano_session_router(update, context, owner_id, args, text)
     elif sub == "checkin":
         await _piano_checkin(update, owner_id, args, text)
     elif sub == "pieces":
@@ -124,6 +140,76 @@ async def piano_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /piano session …
+# ---------------------------------------------------------------------------
+
+
+async def _piano_session_router(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    owner_id: int,
+    args: list[str],
+    text: str,
+) -> None:
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/piano session start\n"
+            "/piano session stop [pieces practiced]"
+        )
+        return
+
+    action = args[1].lower()
+    if action == "start":
+        await _piano_session_start(update, owner_id)
+    elif action == "stop":
+        await _piano_session_stop(update, context, owner_id, text)
+    else:
+        await update.message.reply_text(f"Unknown session action: {action}")
+
+
+async def _piano_session_start(update: Update, owner_id: int) -> None:
+    started_at = await db.start_piano_session(owner_id)
+    time_str = started_at.strftime("%H:%M")
+    await update.message.reply_text(
+        f"\u23f1\ufe0f Piano session started at {time_str}. "
+        "Go practice! Use `/piano session stop` when you're done."
+    )
+
+
+async def _piano_session_stop(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    owner_id: int,
+    text: str,
+) -> None:
+    started_at = await db.get_active_piano_session(owner_id)
+    if not started_at:
+        await update.message.reply_text(
+            "No active session found. Use `/piano session start` first."
+        )
+        return
+
+    now = datetime.now(db.WARSAW)
+    duration_minutes = round((now - started_at).total_seconds() / 60)
+    await db.clear_active_piano_session(owner_id)
+
+    body = _strip_subcommand(text, 3)  # strip "/piano session stop"
+    if not body:
+        # No pieces specified, ask for them.
+        context.user_data["pending_piano_log_duration"] = duration_minutes
+        context.user_data["pending_piano_log"] = True
+        await update.message.reply_text(
+            f"\u23f1\ufe0f Session stopped. Duration: {duration_minutes} min.\n"
+            "What pieces did you practice? (Reply with titles, or `none` if just exercises)"
+        )
+        return
+
+    # Pieces specified in the stop command
+    await _ingest_log(update, owner_id, f"{duration_minutes} min {body}")
+
+
+# ---------------------------------------------------------------------------
 # Summary (no args)
 # ---------------------------------------------------------------------------
 
@@ -132,6 +218,7 @@ async def _piano_summary(update: Update, owner_id: int) -> None:
     streak = await db.get_piano_streak(owner_id)
     pieces = await db.list_piano_pieces(owner_id)
     sessions = await db.list_piano_sessions(owner_id, limit=1)
+    active_start = await db.get_active_piano_session(owner_id)
 
     lines: list[str] = []
     current = int(streak.get("current_streak") or 0)
@@ -139,6 +226,11 @@ async def _piano_summary(update: Update, owner_id: int) -> None:
 
     in_progress = repertoire.summarize_in_progress(pieces)
     lines.append(f"In progress: {in_progress}")
+
+    if active_start:
+        now = datetime.now(db.WARSAW)
+        elapsed = round((now - active_start).total_seconds() / 60)
+        lines.append(f"\u23f1\ufe0f Active session: {elapsed} min (started {active_start.strftime('%H:%M')})")
 
     if sessions:
         last = sessions[0]
@@ -184,8 +276,15 @@ async def _piano_log(
     await _ingest_log(update, owner_id, body)
 
 
-async def _ingest_log(update: Update, owner_id: int, body: str) -> None:
+async def _ingest_log(
+    update: Update,
+    owner_id: int,
+    body: str,
+    duration_override: int | None = None,
+) -> None:
     duration, pieces_practiced, notes = _parse_log_body(body)
+    if duration is None:
+        duration = duration_override
 
     if duration is None and not pieces_practiced:
         await update.message.reply_text(
@@ -635,8 +734,9 @@ async def piano_text_dispatch(
         return False
 
     del context.user_data["pending_piano_log"]
+    duration_override = context.user_data.pop("pending_piano_log_duration", None)
     owner_id = update.effective_user.id
-    await _ingest_log(update, owner_id, body)
+    await _ingest_log(update, owner_id, body, duration_override=duration_override)
     return True
 
 
