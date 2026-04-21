@@ -124,6 +124,8 @@ Disabling a module removes its commands from the bot and stops its scheduled job
 | _(PDF document)_ | Analyse PDF invoice; shows preview card with Save / Discard |
 | `/invoice` | Show invoice module usage |
 | `/invoices [N]` | List last N saved invoices (default 10) |
+| `/invoices month [YYYY-MM]` | Monthly expense summary with category breakdown and amortized costs (default: current month) |
+| `/invoices avg [N]` | Average monthly cost over last N months (default 6); months with no invoices count as zero |
 | `/scan [dir]` | Process all unprocessed files in catalog dir one by one |
 | `/emails [N]` | Fetch up to N (default 10) unread Gmail messages; marks them as read |
 | `/model [openrouter\|local\|custom] [model-name]` | View or switch LLM provider |

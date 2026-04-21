@@ -98,15 +98,17 @@ async def emails_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     invoices_enabled = cfg.modules.invoices.enabled
+    auto_process = invoices_enabled and cfg.modules.gmail.auto_process_invoices
     context.user_data.setdefault("gmail_bodies", {})
     context.user_data.setdefault("gmail_inv_paths", {})
     inv_key = context.user_data.get("gmail_inv_next_key", 0)
+    apple_auto_queue: list[str] = []
 
     for email_data in emails:
         context.user_data["gmail_bodies"][email_data.id] = email_data.body_text
         text, kb = format_email(email_data)
 
-        # Add "Process as invoice" button for each saved PDF attachment
+        # Add "Process as invoice" button for PDF attachments or Apple body invoices
         if invoices_enabled:
             inv_rows = []
             for att in email_data.attachments:
@@ -121,12 +123,36 @@ async def emails_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     )
                     inv_key += 1
 
+            # Apple sends invoice details in the email body, never as a PDF attachment
+            is_apple = (
+                not inv_rows
+                and email_data.body_text
+                and "your invoice from apple" in email_data.subject.lower()
+            )
+            if is_apple:
+                if auto_process:
+                    apple_auto_queue.append(email_data.id)
+                else:
+                    inv_rows.append(
+                        [InlineKeyboardButton("🧾 Parse Apple invoice", callback_data=f"inv_body:{email_data.id}")]
+                    )
+
             if inv_rows:
                 existing = list(kb.inline_keyboard) if kb else []
                 kb = InlineKeyboardMarkup(existing + inv_rows)
 
         context.user_data["gmail_inv_next_key"] = inv_key
         await update.message.reply_text(text, reply_markup=kb)
+
+    if apple_auto_queue:
+        from bot.modules.invoices.handlers.invoices import start_gmail_auto_processing
+        await start_gmail_auto_processing(
+            context,
+            update.effective_chat.id,
+            update.effective_user.id,
+            context.bot,
+            apple_auto_queue,
+        )
 
 
 async def read_more_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

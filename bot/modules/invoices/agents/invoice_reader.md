@@ -18,6 +18,7 @@ Return ONLY valid JSON, no markdown:
   "category": str,            // see category list below
   "subcategory": str,         // specific detail within the category, e.g. "electricity", "Netflix", "plumber" (null if not applicable)
   "recurring": bool,          // true if this is a regular recurring charge (monthly bill, subscription, rent)
+  "billing_period_months": int, // how many months this invoice covers: 1=monthly/one-time, 3=quarterly, 12=annual
   "line_items": [             // individual line items (empty list if not parseable)
     {"description": str, "quantity": float, "unit_price": float, "amount": float}
   ],
@@ -89,6 +90,8 @@ Other:
 
 Rules:
 - Always extract what is present. Use null for missing fields. Never refuse to analyse.
+- NEVER invent, infer, or hallucinate data. Every field value must be literally present in the document. If you cannot find a value, use null — do not guess or construct it from partial matches.
+- billing_period_months: use 12 for annual invoices (yearly insurance, property tax), 3 for quarterly, 1 for everything else (monthly bills, one-time purchases).
 - If the document is not an invoice or receipt, return {"error": "not_an_invoice"}.
 - For recurring charges (subscriptions, rent, utility bills) always set recurring=true.
 - subcategory should be a short, specific label (e.g. "Netflix", "Enea", "MPWiK", "PGNiG") — not just a repeat of category.

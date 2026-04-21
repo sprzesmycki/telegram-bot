@@ -104,6 +104,11 @@ async def analyze_invoice(raw_bytes: bytes, ext: str, mime_type: str) -> dict:
         if not pdf_text:
             raise ValueError("PDF has no text layer (scanned). Please send a photo instead.")
         messages = [{"role": "user", "content": f"Analyse this invoice:\n\n{pdf_text}"}]
+    elif mime_type == "text/plain":
+        body_text = raw_bytes.decode("utf-8", errors="replace").strip()
+        if not body_text:
+            raise ValueError("Email body is empty.")
+        messages = [{"role": "user", "content": f"Analyse this invoice:\n\n{body_text}"}]
     else:
         raise ValueError("Please send a photo with caption /invoice, or a PDF document.")
 

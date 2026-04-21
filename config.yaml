@@ -30,7 +30,7 @@ storage:
 
 modules:
   calories:
-    enabled: true
+    enabled: false
     schedules:
       daily_summary_time: "21:00"
       daily_review_time: "22:00"
@@ -45,3 +45,4 @@ modules:
     check_interval_minutes: 60
     max_results: 1
     label: "INBOX"
+    auto_process_invoices: false

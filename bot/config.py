@@ -83,6 +83,7 @@ class GmailModuleConfig:
     check_interval_minutes: int
     max_results: int
     label: str
+    auto_process_invoices: bool
 
 
 @dataclass
@@ -210,6 +211,7 @@ def load_config(path: Path | None = None) -> AppConfig:
                 check_interval_minutes=gml_sec.get("check_interval_minutes", 5),
                 max_results=gml_sec.get("max_results", 10),
                 label=gml_sec.get("label", "INBOX"),
+                auto_process_invoices=gml_sec.get("auto_process_invoices", False),
             ),
         ),
     )
