@@ -14,7 +14,15 @@ def _effective(invoice: dict) -> float:
     return total / period
 
 
-def build_month_summary(invoices: list[dict]) -> dict:
+def _effective_sub(sub: dict) -> float:
+    amount = float(sub.get("amount") or 0)
+    period = int(sub.get("billing_period_months") or 1)
+    if period not in (1, 3, 12):
+        period = 1
+    return amount / period
+
+
+def build_month_summary(invoices: list[dict], subscriptions: list[dict] | None = None) -> dict:
     total_actual = 0.0
     total_effective = 0.0
     by_category: dict[str, dict] = defaultdict(lambda: {"actual": 0.0, "effective": 0.0, "count": 0})
@@ -47,6 +55,23 @@ def build_month_summary(invoices: list[dict]) -> dict:
         vendor_totals[vendor] += actual
         vendor_counts[vendor] += 1
 
+    for sub in (subscriptions or []):
+        eff = _effective_sub(sub)
+        cat = sub.get("category") or "subscriptions"
+
+        total_actual += eff
+        total_effective += eff
+        by_category[cat]["actual"] += eff
+        by_category[cat]["effective"] += eff
+        by_category[cat]["count"] += 1
+
+        recurring_actual += eff
+        recurring_count += 1
+
+        name = sub.get("name") or "Unknown"
+        vendor_totals[name] += eff
+        vendor_counts[name] += 1
+
     top_vendors = sorted(
         [{"vendor": v, "total": vendor_totals[v], "count": vendor_counts[v]} for v in vendor_totals],
         key=lambda x: x["total"],
@@ -61,11 +86,18 @@ def build_month_summary(invoices: list[dict]) -> dict:
         "one_time": {"actual": one_time_actual, "count": one_time_count},
         "top_vendors": top_vendors,
         "invoice_count": len(invoices),
+        "subscription_count": len(subscriptions or []),
     }
 
 
-def build_avg_summary(invoices: list[dict], n_months: int, end_year: int, end_month: int) -> dict:
-    """Aggregate invoices over n_months ending at (end_year, end_month) inclusive."""
+def build_avg_summary(
+    invoices: list[dict],
+    n_months: int,
+    end_year: int,
+    end_month: int,
+    subscriptions: list[dict] | None = None,
+) -> dict:
+    """Aggregate invoices (and optionally subscriptions) over n_months ending at (end_year, end_month) inclusive."""
     months: list[tuple[int, int]] = []
     y, m = end_year, end_month
     for _ in range(n_months):
@@ -100,6 +132,32 @@ def build_avg_summary(invoices: list[dict], n_months: int, end_year: int, end_mo
         per_month[ym]["count"] += 1
         cat = inv.get("category") or "other"
         by_category[cat] += eff
+
+    for sub in (subscriptions or []):
+        eff = _effective_sub(sub)
+        cat = sub.get("category") or "subscriptions"
+
+        sub_start = sub.get("start_date")
+        sub_end = sub.get("end_date")
+        if isinstance(sub_start, str):
+            try:
+                sub_start = date.fromisoformat(sub_start[:10])
+            except ValueError:
+                continue
+        if isinstance(sub_end, str):
+            try:
+                sub_end = date.fromisoformat(sub_end[:10])
+            except ValueError:
+                sub_end = None
+
+        for (ym_y, ym_m) in months:
+            month_start = date(ym_y, ym_m, 1)
+            month_end = date(ym_y, ym_m, monthrange(ym_y, ym_m)[1])
+            if sub_start <= month_end and (sub_end is None or sub_end >= month_start):
+                per_month[(ym_y, ym_m)]["actual"] += eff
+                per_month[(ym_y, ym_m)]["effective"] += eff
+                per_month[(ym_y, ym_m)]["count"] += 1
+                by_category[cat] += eff
 
     total_effective = sum(v["effective"] for v in per_month.values())
     total_actual = sum(v["actual"] for v in per_month.values())

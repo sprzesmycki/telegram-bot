@@ -83,6 +83,11 @@ class InvoicesModuleConfig:
 
 
 @dataclass
+class SubscriptionsModuleConfig:
+    enabled: bool
+
+
+@dataclass
 class GmailModuleConfig:
     enabled: bool
     check_interval_minutes: int
@@ -97,6 +102,7 @@ class ModulesConfig:
     supplements: SupplementsModuleConfig
     piano: PianoModuleConfig
     invoices: InvoicesModuleConfig
+    subscriptions: SubscriptionsModuleConfig
     gmail: GmailModuleConfig
 
 
@@ -136,6 +142,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     cal_sec = mod_sec.get("calories", {})
     pia_sec = mod_sec.get("piano", {})
     inv_sec = mod_sec.get("invoices", {})
+    sub_sec = mod_sec.get("subscriptions", {})
     gml_sec = mod_sec.get("gmail", {})
     sup_sec = mod_sec.get("supplements", {})
 
@@ -215,6 +222,9 @@ def load_config(path: Path | None = None) -> AppConfig:
             ),
             invoices=InvoicesModuleConfig(
                 enabled=inv_sec.get("enabled", False),
+            ),
+            subscriptions=SubscriptionsModuleConfig(
+                enabled=sub_sec.get("enabled", False),
             ),
             gmail=GmailModuleConfig(
                 enabled=gml_sec.get("enabled", False),

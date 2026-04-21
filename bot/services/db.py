@@ -1175,3 +1175,147 @@ async def delete_invoice(owner_id: int, invoice_id: int) -> bool:
         invoice_id, owner_id,
     )
     return row is not None
+
+
+# ---------------------------------------------------------------------------
+# Subscriptions
+# ---------------------------------------------------------------------------
+
+
+async def create_subscription(
+    owner_id: int,
+    name: str,
+    vendor: str | None,
+    category: str,
+    subcategory: str | None,
+    amount: float,
+    currency: str,
+    billing_period_months: int,
+    notes: str | None,
+) -> int:
+    return await _pool_or_raise().fetchval(
+        """
+        INSERT INTO subscriptions
+            (owner_user_id, name, vendor, category, subcategory, amount, currency,
+             billing_period_months, notes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING id
+        """,
+        owner_id, name, vendor, category, subcategory, amount, currency,
+        billing_period_months, notes,
+    )
+
+
+async def get_subscription(sub_id: int, owner_id: int) -> dict | None:
+    row = await _pool_or_raise().fetchrow(
+        "SELECT * FROM subscriptions WHERE id = $1 AND owner_user_id = $2",
+        sub_id, owner_id,
+    )
+    return dict(row) if row else None
+
+
+async def list_subscriptions(owner_id: int, active_only: bool = True) -> list[dict]:
+    if active_only:
+        rows = await _pool_or_raise().fetch(
+            "SELECT * FROM subscriptions WHERE owner_user_id = $1 AND active = TRUE ORDER BY name",
+            owner_id,
+        )
+    else:
+        rows = await _pool_or_raise().fetch(
+            "SELECT * FROM subscriptions WHERE owner_user_id = $1 ORDER BY active DESC, name",
+            owner_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def update_subscription_price(owner_id: int, sub_id: int, new_amount: float) -> int | None:
+    """Deactivate old subscription and create a new one with updated price starting today.
+
+    Returns the new subscription id, or None if sub_id was not found.
+    """
+    today = date.today()
+    yesterday = date(today.year, today.month, today.day - 1) if today.day > 1 else date(
+        today.year if today.month > 1 else today.year - 1,
+        today.month - 1 if today.month > 1 else 12,
+        28,  # safe last day of any month
+    )
+    async with _pool_or_raise().acquire() as conn:
+        async with conn.transaction():
+            old = await conn.fetchrow(
+                "SELECT * FROM subscriptions WHERE id = $1 AND owner_user_id = $2",
+                sub_id, owner_id,
+            )
+            if not old:
+                return None
+            await conn.execute(
+                "UPDATE subscriptions SET active = FALSE, end_date = $3 WHERE id = $1 AND owner_user_id = $2",
+                sub_id, owner_id, yesterday,
+            )
+            new_id = await conn.fetchval(
+                """
+                INSERT INTO subscriptions
+                    (owner_user_id, name, vendor, category, subcategory, amount, currency,
+                     billing_period_months, active, start_date, notes)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, $10)
+                RETURNING id
+                """,
+                owner_id, old["name"], old["vendor"], old["category"], old["subcategory"],
+                new_amount, old["currency"], old["billing_period_months"], today, old["notes"],
+            )
+            return new_id
+
+
+async def set_subscription_active(owner_id: int, sub_id: int, active: bool) -> bool:
+    today = date.today()
+    if active:
+        row = await _pool_or_raise().fetchrow(
+            "UPDATE subscriptions SET active = TRUE, end_date = NULL WHERE id = $1 AND owner_user_id = $2 RETURNING id",
+            sub_id, owner_id,
+        )
+    else:
+        row = await _pool_or_raise().fetchrow(
+            "UPDATE subscriptions SET active = FALSE, end_date = $3 WHERE id = $1 AND owner_user_id = $2 RETURNING id",
+            sub_id, owner_id, today,
+        )
+    return row is not None
+
+
+async def delete_subscription(owner_id: int, sub_id: int) -> bool:
+    row = await _pool_or_raise().fetchrow(
+        "DELETE FROM subscriptions WHERE id = $1 AND owner_user_id = $2 RETURNING id",
+        sub_id, owner_id,
+    )
+    return row is not None
+
+
+async def get_subscriptions_active_in_month(owner_id: int, year: int, month: int) -> list[dict]:
+    from calendar import monthrange
+    last_day = monthrange(year, month)[1]
+    month_start = date(year, month, 1)
+    month_end = date(year, month, last_day)
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM subscriptions
+        WHERE owner_user_id = $1
+          AND start_date <= $2
+          AND (end_date IS NULL OR end_date >= $3)
+        ORDER BY name
+        """,
+        owner_id, month_end, month_start,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_subscriptions_active_in_range(owner_id: int, start: date, end: date) -> list[dict]:
+    """Return all subscriptions that overlap with [start, end) range."""
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM subscriptions
+        WHERE owner_user_id = $1
+          AND start_date < $3
+          AND (end_date IS NULL OR end_date >= $2)
+        ORDER BY start_date, name
+        """,
+        owner_id, start, end,
+    )
+    return [dict(r) for r in rows]
