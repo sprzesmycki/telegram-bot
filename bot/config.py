@@ -55,6 +55,8 @@ class LoggingConfig:
     level: str
     file: str
     debug: bool
+    rotation: str = "daily"  # "daily" | "hourly"
+    keep_days: int = 30
 
 
 @dataclass
@@ -81,6 +83,7 @@ class GmailModuleConfig:
     check_interval_minutes: int
     max_results: int
     label: str
+    auto_process_invoices: bool
 
 
 @dataclass
@@ -147,6 +150,8 @@ def load_config(path: Path | None = None) -> AppConfig:
             level=_env("LOG_LEVEL", "DEBUG" if debug else log_sec.get("level", "INFO")).upper(),
             file=_env("LOG_FILE", log_sec.get("file", "./data/logs/bot.log")),
             debug=debug,
+            rotation=log_sec.get("rotation", "daily"),
+            keep_days=int(log_sec.get("keep_days", 30)),
         ),
         llm=LLMConfig(
             provider=_env("LLM_PROVIDER", llm_sec.get("provider", "openrouter")),
@@ -206,6 +211,7 @@ def load_config(path: Path | None = None) -> AppConfig:
                 check_interval_minutes=gml_sec.get("check_interval_minutes", 5),
                 max_results=gml_sec.get("max_results", 10),
                 label=gml_sec.get("label", "INBOX"),
+                auto_process_invoices=gml_sec.get("auto_process_invoices", False),
             ),
         ),
     )

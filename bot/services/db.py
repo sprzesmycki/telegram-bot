@@ -983,13 +983,17 @@ async def log_invoice(
     gmail_message_id: str | None = None,
     original_filename: str | None = None,
 ) -> int:
+    billing_period = int(parsed.get("billing_period_months") or 1)
+    if billing_period not in (1, 3, 12):
+        billing_period = 1
     return await _pool_or_raise().fetchval(
         """
         INSERT INTO invoices (
             owner_user_id, vendor, invoice_number, issue_date, due_date,
             currency, subtotal, tax, total, category, subcategory, recurring,
-            line_items, notes, source, gmail_message_id, file_path, original_filename
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18)
+            billing_period_months, line_items, notes, source, gmail_message_id,
+            file_path, original_filename
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)
         RETURNING id
         """,
         owner_id,
@@ -1004,6 +1008,7 @@ async def log_invoice(
         parsed.get("category"),
         parsed.get("subcategory"),
         bool(parsed.get("recurring", False)),
+        billing_period,
         json.dumps(parsed.get("line_items") or []),
         parsed.get("notes"),
         source,
@@ -1061,6 +1066,47 @@ async def list_invoices(owner_id: int, limit: int = 10) -> list[dict]:
         LIMIT $2
         """,
         owner_id, limit,
+    )
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["line_items"] = _load_jsonb(d.get("line_items"))
+        result.append(d)
+    return result
+
+
+async def get_invoices_for_month(owner_id: int, year: int, month: int) -> list[dict]:
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM invoices
+        WHERE owner_user_id = $1
+          AND issue_date IS NOT NULL
+          AND EXTRACT(YEAR FROM issue_date) = $2
+          AND EXTRACT(MONTH FROM issue_date) = $3
+        ORDER BY issue_date
+        """,
+        owner_id, year, month,
+    )
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["line_items"] = _load_jsonb(d.get("line_items"))
+        result.append(d)
+    return result
+
+
+async def get_invoices_for_range(owner_id: int, start: date, end: date) -> list[dict]:
+    """Return all invoices where issue_date >= start and issue_date < end."""
+    rows = await _pool_or_raise().fetch(
+        """
+        SELECT * FROM invoices
+        WHERE owner_user_id = $1
+          AND issue_date IS NOT NULL
+          AND issue_date >= $2
+          AND issue_date < $3
+        ORDER BY issue_date
+        """,
+        owner_id, start, end,
     )
     result = []
     for r in rows:

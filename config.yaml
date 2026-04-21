@@ -5,6 +5,8 @@ logging:
   level: "INFO"
   file: "./data/logs/bot.log"
   debug: false
+  rotation: "daily"   # "daily" | "hourly"
+  keep_days: 30       # number of rotated files to keep
 
 llm:
   provider: "openrouter"
@@ -28,7 +30,7 @@ storage:
 
 modules:
   calories:
-    enabled: true
+    enabled: false
     schedules:
       daily_summary_time: "21:00"
       daily_review_time: "22:00"
@@ -41,5 +43,6 @@ modules:
   gmail:
     enabled: true
     check_interval_minutes: 60
-    max_results: 10
+    max_results: 1
     label: "INBOX"
+    auto_process_invoices: false

@@ -11,8 +11,9 @@ Usage (call once, as early as possible):
 from __future__ import annotations
 
 import logging
+import os
 import sys
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 # Console format — concise, one line per event
@@ -59,13 +60,21 @@ def setup_logging() -> logging.Logger:
     console.setFormatter(logging.Formatter(_CONSOLE_FMT, _DATE_FMT))
     root.addHandler(console)
 
-    # --- Rotating file handler ---
-    file_handler = RotatingFileHandler(
+    # --- Time-based rotating file handler ---
+    when = "midnight" if cfg.rotation == "daily" else "h"
+    backup_count = cfg.keep_days if cfg.rotation == "daily" else cfg.keep_days * 24
+    file_handler = TimedRotatingFileHandler(
         log_file,
-        maxBytes=5 * 1024 * 1024,  # 5 MB per file
-        backupCount=10,  # keep 10 rotated files = 50 MB total
+        when=when,
+        backupCount=backup_count,
         encoding="utf-8",
+        utc=False,
     )
+    # Rename rotated files so the date comes before the extension:
+    # bot.log → bot.2026-04-21.log  (daily)
+    # bot.log → bot.2026-04-21_14.log  (hourly)
+    _base, _ext = os.path.splitext(str(log_file))
+    file_handler.namer = lambda name: name.replace(str(log_file), _base) + _ext
     # File always captures DEBUG so you can diff a crash after the fact
     file_handler.setLevel(logging.DEBUG if debug_mode else level)
     file_handler.setFormatter(logging.Formatter(_FILE_FMT, _DATE_FMT))
