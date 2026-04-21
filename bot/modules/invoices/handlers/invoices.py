@@ -804,6 +804,26 @@ async def _invoices_month(update: Update, owner_id: int, args: list[str]) -> Non
             arrow = "+" if change_pct >= 0 else ""
             lines.append(f"\n📉 vs {prev_label}: {arrow}{change_pct:.0f}% actual")
 
+    # Individual invoice list
+    lines.append("\n📋 Invoices:")
+    for i, inv in enumerate(invoices, 1):
+        vendor = inv.get("vendor") or "Unknown"
+        total = inv.get("total")
+        currency = inv.get("currency") or ""
+        cat = inv.get("category") or "—"
+        sub = inv.get("subcategory")
+        cat_str = f"{cat} › {sub}" if sub else cat
+        recurring_mark = " 🔁" if inv.get("recurring") else ""
+        notes = inv.get("notes") or ""
+        date_str = str(inv.get("issue_date") or "—")[:10]
+        lines.append(
+            f"\n{i}. {vendor}{recurring_mark}\n"
+            f"   Date:     {date_str}\n"
+            f"   Amount:   {_fmt_currency(float(total or 0), currency)}\n"
+            f"   Category: {cat_str}"
+            + (f"\n   Notes:    {notes}" if notes else "")
+        )
+
     await update.message.reply_text("\n".join(lines))
 
 
