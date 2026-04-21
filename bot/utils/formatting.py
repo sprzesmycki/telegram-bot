@@ -261,12 +261,13 @@ def format_report(
     liquids: list[dict],
     total: dict,
     hydration_ml: int,
-    supplements_scheduled: list[dict],
-    supplements_taken: list[dict],
+    supplements_scheduled: list[dict] | None = None,
+    supplements_taken: list[dict] | None = None,
 ) -> str:
     taken_names: set[str] = set()
-    for s in supplements_taken:
-        taken_names.add(s.get("name") or s.get("supplement_id", ""))
+    if supplements_taken:
+        for s in supplements_taken:
+            taken_names.add(s.get("name") or s.get("supplement_id", ""))
 
     lines: list[str] = [
         "Nutrition Report",
@@ -321,14 +322,15 @@ def format_report(
     elif goal:
         lines.append(f"Goal: {goal} kcal")
 
-    lines.append("")
-    lines.append("--- Supplements ---")
-    for sup in supplements_scheduled:
-        name = sup["name"]
-        reminder = sup["reminder_time"]
-        dose_str = f" ({sup['dose']})" if sup.get("dose") else ""
-        check = "x" if name in taken_names else " "
-        lines.append(f"[{check}] {name}{dose_str} ({reminder})")
+    if supplements_scheduled:
+        lines.append("")
+        lines.append("--- Supplements ---")
+        for sup in supplements_scheduled:
+            name = sup["name"]
+            reminder = sup["reminder_time"]
+            dose_str = f" ({sup['dose']})" if sup.get("dose") else ""
+            check = "x" if name in taken_names else " "
+            lines.append(f"[{check}] {name}{dose_str} ({reminder})")
 
     return "\n".join(lines)
 

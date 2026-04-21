@@ -67,6 +67,11 @@ class CaloriesModuleConfig:
 
 
 @dataclass
+class SupplementsModuleConfig:
+    enabled: bool
+
+
+@dataclass
 class PianoModuleConfig:
     enabled: bool
     checkin_time: str
@@ -89,6 +94,7 @@ class GmailModuleConfig:
 @dataclass
 class ModulesConfig:
     calories: CaloriesModuleConfig
+    supplements: SupplementsModuleConfig
     piano: PianoModuleConfig
     invoices: InvoicesModuleConfig
     gmail: GmailModuleConfig
@@ -131,6 +137,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     pia_sec = mod_sec.get("piano", {})
     inv_sec = mod_sec.get("invoices", {})
     gml_sec = mod_sec.get("gmail", {})
+    sup_sec = mod_sec.get("supplements", {})
 
     debug = (
         os.getenv("DEBUG", "").strip().lower() in ("1", "true", "yes", "on", "debug")
@@ -198,6 +205,9 @@ def load_config(path: Path | None = None) -> AppConfig:
                 enabled=cal_sec.get("enabled", True),
                 daily_summary_time=cal_sec.get("schedules", {}).get("daily_summary_time", "21:00"),
                 daily_review_time=cal_sec.get("schedules", {}).get("daily_review_time", "22:00"),
+            ),
+            supplements=SupplementsModuleConfig(
+                enabled=sup_sec.get("enabled", True),
             ),
             piano=PianoModuleConfig(
                 enabled=pia_sec.get("enabled", True),

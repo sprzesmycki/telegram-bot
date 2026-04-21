@@ -40,14 +40,19 @@ async def _gather_day_data(
         liquids = await db.get_liquids_today(profile["id"], owner_id)
         totals = await db.get_daily_totals(profile["id"], owner_id)
         hydration = await db.get_daily_hydration(profile["id"], owner_id)
-        supplements_scheduled = await db.list_supplements(profile["id"], owner_id)
-        supplement_logs = await db.get_supplement_logs_today(profile["id"])
-        taken_names: list[str] = []
-        for log in supplement_logs:
-            for s in supplements_scheduled:
-                if s["id"] == log["supplement_id"]:
-                    taken_names.append(s["name"])
-                    break
+
+        from bot.config import get_config
+        cfg = get_config()
+        supplements_scheduled = []
+        taken_names = []
+        if cfg.modules.supplements.enabled:
+            supplements_scheduled = await db.list_supplements(profile["id"], owner_id)
+            supplement_logs = await db.get_supplement_logs_today(profile["id"])
+            for log in supplement_logs:
+                for s in supplements_scheduled:
+                    if s["id"] == log["supplement_id"]:
+                        taken_names.append(s["name"])
+                        break
     else:
         next_day = (
             datetime.strptime(review_date, "%Y-%m-%d").date() + timedelta(days=1)

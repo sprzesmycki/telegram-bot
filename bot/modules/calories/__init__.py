@@ -15,8 +15,6 @@ from bot.modules.calories.handlers.liquids import register as _reg_liquids
 from bot.modules.calories.handlers.review import register as _reg_review
 from bot.modules.calories.handlers.summary import COMMANDS as _SUM_COMMANDS
 from bot.modules.calories.handlers.summary import register as _reg_summary
-from bot.modules.calories.handlers.supplements import COMMANDS as _SUP_COMMANDS
-from bot.modules.calories.handlers.supplements import register as _reg_supplements
 
 
 class CaloriesModule:
@@ -28,7 +26,6 @@ class CaloriesModule:
         _CAL_COMMANDS
         + _LIQ_COMMANDS
         + _GOAL_COMMANDS
-        + _SUP_COMMANDS
         + _SUM_COMMANDS
         + [("review", "AI-powered daily nutrition review")]
     )
@@ -37,7 +34,6 @@ class CaloriesModule:
         _reg_goals(app)
         _reg_calories(app)
         _reg_liquids(app)
-        _reg_supplements(app)
         _reg_summary(app)
         _reg_review(app)
 

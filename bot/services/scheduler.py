@@ -144,11 +144,16 @@ async def load_all_reminders(scheduler: AsyncIOScheduler, bot) -> None:
     """Load all active supplements and generic reminders from DB and register jobs."""
     from zoneinfo import ZoneInfo
     from bot.services import db
+    from bot.config import get_config
 
-    supplements = await db.get_all_active_supplements()
-    for sup in supplements:
-        register_supplement_reminder(scheduler, bot, sup)
-    logger.info("Loaded %d supplement reminders from DB", len(supplements))
+    cfg = get_config()
+    if cfg.modules.supplements.enabled:
+        supplements = await db.get_all_active_supplements()
+        for sup in supplements:
+            register_supplement_reminder(scheduler, bot, sup)
+        logger.info("Loaded %d supplement reminders from DB", len(supplements))
+    else:
+        logger.info("Supplements module disabled; skipping reminders loading")
 
     now = datetime.now(ZoneInfo("Europe/Warsaw"))
     reminders = await db.get_all_active_reminders()

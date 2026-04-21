@@ -39,6 +39,13 @@ def load_enabled_modules():
     else:
         logger.info("Module disabled: calories")
 
+    if cfg.modules.supplements.enabled:
+        from bot.modules.supplements import module as supplements_module
+        modules.append(supplements_module)
+        logger.info("Module loaded: supplements")
+    else:
+        logger.info("Module disabled: supplements")
+
     if cfg.modules.invoices.enabled:
         from bot.modules.invoices import module as invoices_module
         modules.append(invoices_module)
