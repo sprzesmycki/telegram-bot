@@ -20,8 +20,11 @@ logger = logging.getLogger(__name__)
 
 def register_all(scheduler: AsyncIOScheduler, bot) -> None:
     cfg = get_config().modules.calories
-    _register_daily_summary(scheduler, bot, cfg.daily_summary_time)
-    _register_daily_review(scheduler, bot, cfg.daily_review_time)
+    if cfg.enabled:
+        _register_daily_summary(scheduler, bot, cfg.daily_summary_time)
+        _register_daily_review(scheduler, bot, cfg.daily_review_time)
+    else:
+        logger.info("Calories module disabled; skipping daily summary/review scheduling")
 
 
 def _register_daily_summary(scheduler: AsyncIOScheduler, bot, time_str: str) -> None:
@@ -30,9 +33,14 @@ def _register_daily_summary(scheduler: AsyncIOScheduler, bot, time_str: str) -> 
     async def _send_summaries() -> None:
         from bot.modules.calories.handlers.summary import send_daily_summary
         from bot.services import db
+        from bot.config import get_config
+        cfg = get_config()
 
-        supplements = await db.get_all_active_supplements()
-        seen_owners: set[int] = {sup["owner_user_id"] for sup in supplements}
+        seen_owners: set[int] = set()
+        if cfg.modules.supplements.enabled:
+            supplements = await db.get_all_active_supplements()
+            seen_owners.update({sup["owner_user_id"] for sup in supplements})
+
         seen_owners.update(await db.get_distinct_profile_owner_ids())
 
         for owner_id in seen_owners:

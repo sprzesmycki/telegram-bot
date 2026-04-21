@@ -286,11 +286,14 @@ async def supplement_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error("Invalid supplement callback data: %s", query.data)
         return
 
+    logger.info("Supplement callback: action=%s, sup_id=%d, prof_id=%d", action, supplement_id, profile_id)
     owner_id = update.effective_user.id
 
     if action == "sd":
         await db.log_supplement_taken(supplement_id, profile_id)
-        await query.edit_message_text("\u2705 Marked as taken!")
+        await query.edit_message_text("✅ Marked as taken!")
+        logger.info("Supplement %d marked as taken for profile %d", supplement_id, profile_id)
+
 
     elif action == "ss":
         supplement = await db.get_supplement_by_id(supplement_id)
@@ -299,8 +302,8 @@ async def supplement_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         scheduler = context.bot_data.get("scheduler")
         if scheduler is not None:
-            from bot.services.scheduler import schedule_snooze_reminder
-            schedule_snooze_reminder(scheduler, context.bot, supplement, owner_id)
+            from bot.services.scheduler import schedule_snooze_supplement
+            schedule_snooze_supplement(scheduler, context.bot, supplement, owner_id)
             await query.edit_message_text("\U0001f514 Will remind you in 1 hour.")
         else:
             await query.edit_message_text("Scheduler unavailable — please try again later.")

@@ -189,6 +189,14 @@ async def get_profile_by_name(owner_id: int, name: str) -> dict | None:
     return dict(row) if row else None
 
 
+async def get_profile_by_id(profile_id: int) -> dict | None:
+    row = await _pool_or_raise().fetchrow(
+        "SELECT * FROM profiles WHERE id = $1 AND active = TRUE",
+        profile_id,
+    )
+    return dict(row) if row else None
+
+
 async def ensure_default_profile(owner_id: int) -> dict:
     profiles = await list_profiles(owner_id)
     if not profiles:
@@ -515,6 +523,19 @@ async def log_supplement_taken(supplement_id: int, profile_id: int) -> None:
     await _pool_or_raise().execute(
         "INSERT INTO supplement_logs (supplement_id, profile_id) VALUES ($1, $2)",
         supplement_id, profile_id,
+    )
+
+
+async def delete_supplement_log_today(supplement_id: int, profile_id: int) -> None:
+    await _pool_or_raise().execute(
+        """
+        DELETE FROM supplement_logs
+        WHERE supplement_id = $1
+          AND profile_id = $2
+          AND taken_at::date = CURRENT_DATE
+        """,
+        supplement_id,
+        profile_id,
     )
 
 

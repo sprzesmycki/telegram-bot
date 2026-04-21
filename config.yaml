@@ -34,6 +34,8 @@ modules:
     schedules:
       daily_summary_time: "21:00"
       daily_review_time: "22:00"
+  supplements:
+    enabled: true
   piano:
     enabled: true
     schedules:

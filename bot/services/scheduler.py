@@ -103,12 +103,12 @@ def register_supplement_reminder(
 # ---------------------------------------------------------------------------
 
 
-def schedule_snooze_reminder(
+def schedule_snooze_supplement(
     scheduler: AsyncIOScheduler, bot, supplement: dict, owner_id: int,
 ) -> None:
     """Schedule a one-shot reminder 1 hour from now for *supplement*."""
     run_at = datetime.now() + timedelta(hours=1)
-    job_id = f"snooze_{supplement['id']}_{owner_id}"
+    job_id = f"snooze_sup_{supplement['id']}_{owner_id}"
 
     async def _send_snooze() -> None:
         await send_supplement_reminder(bot, supplement, owner_id)
@@ -144,11 +144,16 @@ async def load_all_reminders(scheduler: AsyncIOScheduler, bot) -> None:
     """Load all active supplements and generic reminders from DB and register jobs."""
     from zoneinfo import ZoneInfo
     from bot.services import db
+    from bot.config import get_config
 
-    supplements = await db.get_all_active_supplements()
-    for sup in supplements:
-        register_supplement_reminder(scheduler, bot, sup)
-    logger.info("Loaded %d supplement reminders from DB", len(supplements))
+    cfg = get_config()
+    if cfg.modules.supplements.enabled:
+        supplements = await db.get_all_active_supplements()
+        for sup in supplements:
+            register_supplement_reminder(scheduler, bot, sup)
+        logger.info("Loaded %d supplement reminders from DB", len(supplements))
+    else:
+        logger.info("Supplements module disabled; skipping reminders loading")
 
     now = datetime.now(ZoneInfo("Europe/Warsaw"))
     reminders = await db.get_all_active_reminders()

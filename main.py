@@ -38,9 +38,16 @@ async def unknown_cmd(update, context) -> None:
 async def error_handler(update, context) -> None:
     """Catch-all error handler so the user always gets feedback."""
     logger.error("Unhandled exception", exc_info=context.error)
-    if update and getattr(update, "message", None):
+    if not update:
+        return
+
+    message = getattr(update, "message", None) or (
+        update.callback_query.message if update.callback_query else None
+    )
+
+    if message:
         try:
-            await update.message.reply_text(
+            await message.reply_text(
                 f"Something went wrong: {context.error}"
             )
         except Exception:

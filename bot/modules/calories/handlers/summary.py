@@ -136,16 +136,22 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     goal = await db.get_goal(profile["id"])
     total["goal"] = goal
 
-    supplements_scheduled = await db.list_supplements(profile["id"], owner_id)
-    supplements_taken = await db.get_supplement_logs_today(profile["id"])
+    from bot.config import get_config
+    cfg = get_config()
+    supplements_scheduled = None
+    taken_with_names = None
 
-    # Enrich taken logs with supplement names for matching
-    taken_with_names: list[dict] = []
-    for log in supplements_taken:
-        for s in supplements_scheduled:
-            if s["id"] == log["supplement_id"]:
-                taken_with_names.append({"name": s["name"], "supplement_id": log["supplement_id"]})
-                break
+    if cfg.modules.supplements.enabled:
+        supplements_scheduled = await db.list_supplements(profile["id"], owner_id)
+        supplements_taken = await db.get_supplement_logs_today(profile["id"])
+
+        # Enrich taken logs with supplement names for matching
+        taken_with_names = []
+        for log in supplements_taken:
+            for s in supplements_scheduled:
+                if s["id"] == log["supplement_id"]:
+                    taken_with_names.append({"name": s["name"], "supplement_id": log["supplement_id"]})
+                    break
 
     reply = format_report(
         profile["name"], report_date, meals, liquids, total, hydration_ml,
