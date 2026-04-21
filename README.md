@@ -1,6 +1,6 @@
 # sebson-bot
 
-A personal Telegram bot with modular features: calorie & supplement tracking (via photo or text), piano practice coaching (streaks, repertoire, voice-note analysis), and invoice reading (coming soon). Supports multiple profiles per account.
+A personal Telegram bot with modular features: calorie & supplement tracking (via photo or text), piano practice coaching (streaks, repertoire, voice-note analysis), invoice reading & classification (local LLM), and Gmail notifications. Supports multiple profiles per account.
 
 ## Prerequisites
 
@@ -81,7 +81,12 @@ modules:
     schedules:
       checkin_time: "19:00"
   invoices:
-    enabled: false   # stub — coming soon
+    enabled: true
+  gmail:
+    enabled: false
+    check_interval_minutes: 5
+    max_results: 10
+    label: "INBOX"
 ```
 
 Disabling a module removes its commands from the bot and stops its scheduled jobs. The database tables remain untouched.
@@ -115,6 +120,12 @@ Disabling a module removes its commands from the bot and stops its scheduled job
 | `/piano piece add\|status\|note\|remove <title>` | Manage pieces |
 | `/piano analyze [piece title]` | Analyse the last voice note you sent (feedback) |
 | `/piano history [N]` / `/piano stats` | Recent sessions / totals |
+| _(photo with caption `/invoice`)_ | Analyse invoice photo; shows preview card with Save / Discard |
+| _(PDF document)_ | Analyse PDF invoice; shows preview card with Save / Discard |
+| `/invoice` | Show invoice module usage |
+| `/invoices [N]` | List last N saved invoices (default 10) |
+| `/scan [dir]` | Process all unprocessed files in catalog dir one by one |
+| `/emails [N]` | Fetch up to N (default 10) unread Gmail messages; marks them as read |
 | `/model [openrouter\|local\|custom] [model-name]` | View or switch LLM provider |
 
 ## Sample Commands
@@ -297,6 +308,41 @@ llm:
 
 When set, `/cal` (text and photo) and `/review` (manual and scheduled) run all models in parallel and send one labelled message per model. The primary model's estimate is always what `/yes` confirms — compare messages are informational only.
 
+## Gmail API Setup
+
+The Gmail module is disabled by default. To enable it:
+
+1. **Create a Google Cloud project** and enable the Gmail API at [console.cloud.google.com](https://console.cloud.google.com).
+
+2. **Create OAuth 2.0 credentials** — go to *APIs & Services → Credentials → Create Credentials → OAuth client ID*, choose **Desktop app**, and download the JSON file as `credentials.json`.
+
+3. **Run the auth script once** to generate `token.json`:
+
+   ```bash
+   uv run python scripts/gmail_auth.py
+   ```
+
+   A browser window opens; sign in and grant access. `token.json` is saved next to `credentials.json`. Both files are gitignored.
+
+4. **Set the credentials path** in `.env`:
+
+   ```
+   GMAIL_CREDENTIALS_PATH=./credentials.json
+   ```
+
+5. **Enable the module** in `config.yaml`:
+
+   ```yaml
+   modules:
+     gmail:
+       enabled: true
+       check_interval_minutes: 5   # how often to poll for new mail
+       max_results: 10             # default fetch limit for /emails
+       label: "INBOX"              # Gmail label to watch
+   ```
+
+After restarting the bot, `/emails` fetches your unread messages and the scheduler sends automatic notifications when new mail arrives.
+
 ## Architecture
 
 ```
@@ -312,11 +358,14 @@ bot/
       services/   — Piano business logic (coach, audio_agent, repertoire, streaks)
       scheduled.py — Cron jobs (piano checkin)
     invoices/
-      agents/     — LLM agent .md files (invoice_reader)
-      handlers/   — Telegram command handlers (stub)
+      agents/     — LLM agent .md files (invoice_reader — local:gemma4:26b)
+      handlers/   — /invoice help, /invoices list, photo + PDF handlers, confirm/discard callbacks
+    gmail/
+      handlers/   — /emails command + read-more callback
+      scheduled.py — Interval job: poll for new mail, notify owners
     core/         — Always-on: profiles, reminders, model switch
   handlers/       — Core handlers only (profiles, reminders, model, _common)
-  services/       — db.py, llm.py, scheduler.py, agent_runner.py
+  services/       — db.py, llm.py, scheduler.py, agent_runner.py, gmail.py
   tools/          — MCP-style tool registry (currently empty)
   utils/          — Formatting, logging config, nutrition math, file storage
 alembic/          — Schema migrations (raw SQL via op.execute)

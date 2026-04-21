@@ -46,4 +46,11 @@ def load_enabled_modules():
     else:
         logger.info("Module disabled: invoices")
 
+    if cfg.modules.gmail.enabled:
+        from bot.modules.gmail import module as gmail_module
+        modules.append(gmail_module)
+        logger.info("Module loaded: gmail")
+    else:
+        logger.info("Module disabled: gmail")
+
     return modules

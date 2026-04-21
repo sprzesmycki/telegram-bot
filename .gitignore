@@ -5,6 +5,8 @@ __pycache__/
 # Local environment/secrets
 .venv/
 .env
+credentials.json
+token.json
 
 # Runtime data (SQLite, logs, photos)
 data/

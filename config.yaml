@@ -23,6 +23,8 @@ storage:
   photos_dir: "./data/photos"
   piano_recordings_dir: "./data/piano_recordings"
   invoices_dir: "./data/invoices"
+  invoice_catalog_dir: "./data/invoice_catalog"
+  gmail_attachments_dir: "./data/gmail_attachments"
 
 modules:
   calories:
@@ -35,4 +37,9 @@ modules:
     schedules:
       checkin_time: "19:00"
   invoices:
-    enabled: false
+    enabled: true
+  gmail:
+    enabled: true
+    check_interval_minutes: 60
+    max_results: 10
+    label: "INBOX"
