@@ -100,6 +100,7 @@ Disabling a module removes its commands from the bot and stops its scheduled job
 | `/cal <description> [@name\|@both] [at HH:MM]` | Analyse a meal (text or photo); shows preview |
 | `/recipe <URL or text> [for N] [@name\|@both]` | Analyse a recipe; shows preview |
 | `/yes` | Confirm and log the pending meal/recipe |
+| `/cancel` | Discard the active pending preview or piano log prompt |
 | _(plain text)_ | Refine the pending preview (e.g. "add butter", "larger portion") |
 | `/today [@name\|@both]` | List today's meals & drinks with inline ❌ delete buttons |
 | `/summary [@name]` | Today's meal summary |

@@ -17,6 +17,7 @@ from bot.config import get_config
 logger = logging.getLogger(__name__)
 
 _last_seen_count: int = 0
+_gmail_service_cache: dict[str, object] = {}
 
 
 def register_all(scheduler: AsyncIOScheduler, bot) -> None:
@@ -36,14 +37,17 @@ def _register_mail_check(scheduler: AsyncIOScheduler, bot, interval_minutes: int
         loop = asyncio.get_event_loop()
 
         try:
-            service = await loop.run_in_executor(
-                None, lambda: load_gmail_service(credentials_path)
-            )
+            if credentials_path not in _gmail_service_cache:
+                _gmail_service_cache[credentials_path] = await loop.run_in_executor(
+                    None, lambda: load_gmail_service(credentials_path)
+                )
+            service = _gmail_service_cache[credentials_path]
             count = await loop.run_in_executor(
                 None, lambda: get_unread_count(service, cfg.modules.gmail.label)
             )
         except Exception:
             logger.error("Gmail scheduler: auth/count error", exc_info=True)
+            _gmail_service_cache.pop(credentials_path, None)
             return
 
         if count <= _last_seen_count:
@@ -64,7 +68,6 @@ def _register_mail_check(scheduler: AsyncIOScheduler, bot, interval_minutes: int
             )
         except Exception:
             logger.error("Gmail scheduler: fetch error", exc_info=True)
-            _last_seen_count = count
             return
 
         owner_ids = await db.get_distinct_profile_owner_ids()

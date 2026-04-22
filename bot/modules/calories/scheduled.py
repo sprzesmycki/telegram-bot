@@ -27,8 +27,20 @@ def register_all(scheduler: AsyncIOScheduler, bot) -> None:
         logger.info("Calories module disabled; skipping daily summary/review scheduling")
 
 
+def _parse_schedule_time(time_str: str, label: str) -> tuple[int, int]:
+    try:
+        h, m = map(int, time_str.split(":", 1))
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError
+        return h, m
+    except (ValueError, AttributeError):
+        raise ValueError(
+            f"Invalid {label} time {time_str!r} in config — expected HH:MM (e.g. '21:00')"
+        )
+
+
 def _register_daily_summary(scheduler: AsyncIOScheduler, bot, time_str: str) -> None:
-    hour, minute = map(int, time_str.split(":"))
+    hour, minute = _parse_schedule_time(time_str, "daily_summary_time")
 
     async def _send_summaries() -> None:
         from bot.modules.calories.handlers.summary import send_daily_summary
@@ -43,16 +55,22 @@ def _register_daily_summary(scheduler: AsyncIOScheduler, bot, time_str: str) -> 
 
         seen_owners.update(await db.get_distinct_profile_owner_ids())
 
+        total = 0
+        failures = 0
         for owner_id in seen_owners:
             owner_profiles = await db.list_profiles(owner_id)
             for profile in owner_profiles:
+                total += 1
                 try:
                     await send_daily_summary(bot, owner_id, profile)
                 except Exception:
+                    failures += 1
                     logger.error(
                         "Failed to send daily summary for owner=%s profile=%s",
                         owner_id, profile["name"], exc_info=True,
                     )
+        if failures:
+            logger.warning("daily_summary: %d/%d send(s) failed", failures, total)
 
     scheduler.add_job(
         _send_summaries,
@@ -64,23 +82,29 @@ def _register_daily_summary(scheduler: AsyncIOScheduler, bot, time_str: str) -> 
 
 
 def _register_daily_review(scheduler: AsyncIOScheduler, bot, time_str: str) -> None:
-    hour, minute = map(int, time_str.split(":"))
+    hour, minute = _parse_schedule_time(time_str, "daily_review_time")
 
     async def _send_reviews() -> None:
         from bot.modules.calories.handlers.review import send_daily_review
         from bot.services import db
 
         owner_ids = await db.get_distinct_profile_owner_ids()
+        total = 0
+        failures = 0
         for owner_id in owner_ids:
             owner_profiles = await db.list_profiles(owner_id)
             for profile in owner_profiles:
+                total += 1
                 try:
                     await send_daily_review(bot, owner_id, profile)
                 except Exception:
+                    failures += 1
                     logger.error(
                         "Failed to send daily review for owner=%s profile=%s",
                         owner_id, profile["name"], exc_info=True,
                     )
+        if failures:
+            logger.warning("daily_review: %d/%d send(s) failed", failures, total)
 
     scheduler.add_job(
         _send_reviews,

@@ -15,6 +15,9 @@ uv sync
 uv run alembic upgrade head         # apply schema
 uv run python main.py               # run the bot (polling mode)
 
+# Run tests (always do this after making changes)
+uv run pytest
+
 # Create a new migration
 uv run alembic revision -m "describe change"
 
@@ -22,7 +25,9 @@ uv run alembic revision -m "describe change"
 SQLITE_PATH=./data/caloriebot.db uv run python scripts/migrate_sqlite_to_pg.py
 ```
 
-There is no test suite, linter, or formatter configured — don't invent commands for them.
+## Tests rule
+
+After making any code change, run `uv run pytest` and confirm all tests pass before reporting the task as done. The test suite covers pure utility and parsing functions — no DB or Telegram connection required. If a change breaks a test, fix the test or the code (whichever is wrong) before finishing.
 
 ## Docs rule
 

@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import re
+import time
 from datetime import datetime
 
 import httpx
@@ -315,6 +316,7 @@ async def cal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "eaten_at": eaten_at,
         "profiles": profiles,
         "result": result,
+        "_ts": time.time(),
     }
     compare_models = get_compare_models()
     if compare_models:
@@ -366,6 +368,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "eaten_at": eaten_at,
         "profiles": profiles,
         "result": result,
+        "_ts": time.time(),
     }
     compare_models = get_compare_models()
     if compare_models:
@@ -442,6 +445,7 @@ async def recipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "servings": servings,
         "profiles": profiles,
         "result": result,
+        "_ts": time.time(),
     }
     await _send_recipe_preview(update, context.user_data["pending_meal"])
 
@@ -451,10 +455,19 @@ async def recipe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # ---------------------------------------------------------------------------
 
 
+_PENDING_TTL = 1800  # 30 minutes
+
+
 async def yes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     pending = context.user_data.get("pending_meal")
     if not pending:
         await update.message.reply_text("Nothing to confirm.")
+        return
+    if time.time() - pending.get("_ts", 0) > _PENDING_TTL:
+        del context.user_data["pending_meal"]
+        await update.message.reply_text(
+            "That preview expired (>30 min). Please re-send /cal, /recipe, or /liquid."
+        )
         return
 
     kind = pending["kind"]
@@ -633,6 +646,25 @@ async def today_delete_callback(
 
 
 # ---------------------------------------------------------------------------
+# /cancel command  (clear any active pending state)
+# ---------------------------------------------------------------------------
+
+
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    cleared = []
+    if context.user_data.pop("pending_meal", None) is not None:
+        cleared.append("meal/recipe/liquid preview")
+    if context.user_data.pop("pending_piano_log", None) is not None:
+        context.user_data.pop("pending_piano_log_duration", None)
+        context.user_data.pop("pending_piano_log_ts", None)
+        cleared.append("piano log")
+    if cleared:
+        await update.message.reply_text(f"Cancelled: {', '.join(cleared)}.")
+    else:
+        await update.message.reply_text("Nothing active to cancel.")
+
+
+# ---------------------------------------------------------------------------
 # Refinement handler  (plain text = remark on the pending meal)
 # ---------------------------------------------------------------------------
 
@@ -651,6 +683,9 @@ async def refine_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     pending = context.user_data.get("pending_meal")
     if not pending:
+        return
+    if time.time() - pending.get("_ts", 0) > _PENDING_TTL:
+        del context.user_data["pending_meal"]
         return
 
     remark = (update.message.text or "").strip()
@@ -696,6 +731,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("cal", "Log a meal (photo or text)"),
     ("recipe", "Log a recipe from URL or text"),
     ("yes", "Confirm and log the pending preview"),
+    ("cancel", "Cancel the active pending flow"),
     ("today", "List today's meals & drinks (with delete buttons)"),
 ]
 
@@ -704,6 +740,7 @@ def register(app) -> None:
     app.add_handler(CommandHandler("cal", cal_cmd))
     app.add_handler(CommandHandler("recipe", recipe_cmd))
     app.add_handler(CommandHandler("yes", yes_cmd))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CallbackQueryHandler(today_delete_callback, pattern=r"^del[ml]:"))
     # Photo handler must be registered after command handlers.
