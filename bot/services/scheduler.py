@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -10,6 +11,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 logger = logging.getLogger(__name__)
 
+WARSAW = ZoneInfo("Europe/Warsaw")
+
 
 # ---------------------------------------------------------------------------
 # Scheduler lifecycle
@@ -17,8 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def init_scheduler() -> AsyncIOScheduler:
-    from zoneinfo import ZoneInfo
-    scheduler = AsyncIOScheduler(timezone=ZoneInfo("Europe/Warsaw"))
+    scheduler = AsyncIOScheduler(timezone=WARSAW)
     logger.info("Scheduler created")
     return scheduler
 
@@ -81,8 +83,15 @@ def register_supplement_reminder(
     *supplement* must have keys: id, profile_id, name, dose (optional),
     reminder_time (HH:MM), owner_user_id, profile_name.
     """
-    parts = supplement["reminder_time"].split(":")
-    hour, minute = int(parts[0]), int(parts[1])
+    try:
+        h_str, m_str = supplement["reminder_time"].split(":", 1)
+        hour, minute = int(h_str), int(m_str)
+    except (ValueError, AttributeError):
+        logger.error(
+            "Supplement %d has invalid reminder_time %r — skipping",
+            supplement["id"], supplement.get("reminder_time"),
+        )
+        return
     job_id = f"supplement_{supplement['id']}"
     owner_id = supplement["owner_user_id"]
 
@@ -107,7 +116,7 @@ def schedule_snooze_supplement(
     scheduler: AsyncIOScheduler, bot, supplement: dict, owner_id: int,
 ) -> None:
     """Schedule a one-shot reminder 1 hour from now for *supplement*."""
-    run_at = datetime.now() + timedelta(hours=1)
+    run_at = datetime.now(WARSAW) + timedelta(hours=1)
     job_id = f"snooze_sup_{supplement['id']}_{owner_id}"
 
     async def _send_snooze() -> None:
@@ -142,7 +151,6 @@ def remove_supplement_reminder(
 
 async def load_all_reminders(scheduler: AsyncIOScheduler, bot) -> None:
     """Load all active supplements and generic reminders from DB and register jobs."""
-    from zoneinfo import ZoneInfo
     from bot.services import db
     from bot.config import get_config
 
@@ -155,7 +163,7 @@ async def load_all_reminders(scheduler: AsyncIOScheduler, bot) -> None:
     else:
         logger.info("Supplements module disabled; skipping reminders loading")
 
-    now = datetime.now(ZoneInfo("Europe/Warsaw"))
+    now = datetime.now(WARSAW)
     reminders = await db.get_all_active_reminders()
     loaded = 0
     for reminder in reminders:
@@ -222,8 +230,15 @@ def register_reminder_job(scheduler: AsyncIOScheduler, bot, reminder: dict) -> N
         )
         logger.debug("Registered one-time reminder job %s at %s", job_id, remind_at)
     else:
-        parts = reminder["reminder_time"].split(":")
-        hour, minute = int(parts[0]), int(parts[1])
+        try:
+            h_str, m_str = reminder["reminder_time"].split(":", 1)
+            hour, minute = int(h_str), int(m_str)
+        except (ValueError, AttributeError):
+            logger.error(
+                "Reminder %d has invalid reminder_time %r — skipping",
+                reminder["id"], reminder.get("reminder_time"),
+            )
+            return
         days = reminder.get("days_of_week") or "*"
         trigger_kwargs: dict = {"hour": hour, "minute": minute}
         if days != "*":
@@ -255,7 +270,7 @@ def schedule_snooze_reminder(
     """Schedule a one-shot reminder in 1 hour (snooze)."""
     rid = reminder["id"]
     message = reminder["message"]
-    run_at = datetime.now() + timedelta(hours=1)
+    run_at = datetime.now(WARSAW) + timedelta(hours=1)
     job_id = f"snooze_reminder_{rid}_{owner_id}"
     keyboard = _build_reminder_keyboard(rid)
 

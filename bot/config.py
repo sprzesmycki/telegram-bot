@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -241,12 +242,7 @@ def load_config(path: Path | None = None) -> AppConfig:
 # Module-level singleton
 # ---------------------------------------------------------------------------
 
-_config: AppConfig | None = None
-
-
+@lru_cache(maxsize=1)
 def get_config() -> AppConfig:
     """Return the singleton AppConfig, loading it on first call."""
-    global _config
-    if _config is None:
-        _config = load_config()
-    return _config
+    return load_config()

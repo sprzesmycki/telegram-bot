@@ -776,25 +776,28 @@ async def touch_piano_piece_last_practiced(
 
 
 async def most_practiced_piece(owner_id: int) -> dict | None:
-    sessions = await list_piano_sessions(owner_id, limit=1000)
-    if not sessions:
+    pool = _pool_or_raise()
+    row = await pool.fetchrow(
+        """
+        SELECT title, COUNT(*) AS cnt
+        FROM piano_sessions,
+             jsonb_array_elements_text(pieces_practiced) AS title
+        WHERE owner_user_id = $1
+          AND title <> ''
+        GROUP BY title
+        ORDER BY cnt DESC
+        LIMIT 1
+        """,
+        owner_id,
+    )
+    if row is None:
         return None
 
-    counts: dict[str, int] = {}
-    for session in sessions:
-        for name in session["pieces_practiced"] or []:
-            key = name.strip()
-            if not key:
-                continue
-            counts[key] = counts.get(key, 0) + 1
-
-    if not counts:
-        return None
-
-    top_title, top_count = max(counts.items(), key=lambda kv: kv[1])
+    top_title = row["title"]
+    top_count = int(row["cnt"])
     piece = await find_piano_piece_by_title(owner_id, top_title)
     return {
-        "title": (piece["title"] if piece else top_title),
+        "title": piece["title"] if piece else top_title,
         "composer": piece["composer"] if piece else None,
         "count": top_count,
     }
