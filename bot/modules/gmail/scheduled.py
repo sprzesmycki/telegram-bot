@@ -30,7 +30,11 @@ def _register_mail_check(scheduler: AsyncIOScheduler, bot, interval_minutes: int
         global _last_seen_count
         from bot.modules.gmail.handlers.emails import format_email
         from bot.services import db
-        from bot.services.gmail import fetch_unread, get_unread_count, load_gmail_service
+        from bot.services.gmail import (
+            fetch_unread,
+            get_unread_count,
+            load_gmail_service,
+        )
 
         cfg = get_config()
         credentials_path = os.getenv("GMAIL_CREDENTIALS_PATH", "./credentials.json")

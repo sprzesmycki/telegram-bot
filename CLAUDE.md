@@ -16,7 +16,12 @@ uv run alembic upgrade head         # apply schema
 uv run python main.py               # run the bot (polling mode)
 
 # Run tests (always do this after making changes)
-uv run pytest
+make test          # or: uv run pytest
+
+# Lint and format
+make lint          # ruff check --fix
+make format        # ruff format
+make check         # lint + test in one shot
 
 # Create a new migration
 uv run alembic revision -m "describe change"
@@ -25,9 +30,9 @@ uv run alembic revision -m "describe change"
 SQLITE_PATH=./data/caloriebot.db uv run python scripts/migrate_sqlite_to_pg.py
 ```
 
-## Tests rule
+## Tests and linting rule
 
-After making any code change, run `uv run pytest` and confirm all tests pass before reporting the task as done. The test suite covers pure utility and parsing functions — no DB or Telegram connection required. If a change breaks a test, fix the test or the code (whichever is wrong) before finishing.
+After making any code change, run `make check` (runs ruff + pytest) and confirm everything passes before reporting the task as done. If only editing non-Python files, `make test` alone is enough. The test suite covers pure utility and parsing functions — no DB or Telegram connection required. If a change breaks a test, fix the test or the code (whichever is wrong) before finishing. Use `make lint` to auto-fix ruff issues, `make format` to apply ruff's formatter.
 
 ## Docs rule
 

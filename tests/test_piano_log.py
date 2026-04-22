@@ -1,5 +1,4 @@
 """Tests for the piano log body parser."""
-import pytest
 
 from bot.modules.piano.handlers.piano import _parse_log_body
 

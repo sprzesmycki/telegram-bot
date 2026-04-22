@@ -1,7 +1,5 @@
 """Tests for pure parsing and formatting helpers in bot/utils/formatting.py."""
-from datetime import datetime
 
-import pytest
 
 from bot.utils.formatting import (
     _format_macro_progress,
@@ -11,7 +9,6 @@ from bot.utils.formatting import (
     parse_time,
     strip_command_args,
 )
-
 
 # ---------------------------------------------------------------------------
 # parse_target

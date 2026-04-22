@@ -6,6 +6,7 @@ Create Date: 2026-04-21
 
 """
 from __future__ import annotations
+
 from alembic import op
 
 revision: str = "0009"

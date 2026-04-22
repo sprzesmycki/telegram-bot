@@ -36,6 +36,7 @@ class InvoicesModule:
 
     def register_scheduled(self, scheduler, bot) -> None:
         from datetime import datetime, timedelta
+
         from apscheduler.triggers.date import DateTrigger
         scheduler.add_job(
             _cleanup_stale_pending,

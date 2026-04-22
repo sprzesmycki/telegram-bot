@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, date, time
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 _WARSAW = ZoneInfo("Europe/Warsaw")

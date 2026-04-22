@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import logging
 
-from bot.services import db
-from bot.services.llm import get_llm_client
 from bot.modules.piano.services import repertoire
+from bot.services import db
 
 logger = logging.getLogger(__name__)
 

@@ -7,11 +7,17 @@ import time
 from datetime import date, datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
+from bot.modules.piano.services import audio_agent, coach, repertoire, streaks
 from bot.services import db
 from bot.services.llm import LLMParseError
-from bot.modules.piano.services import audio_agent, coach, repertoire, streaks
 from bot.utils.storage import save_piano_recording
 
 logger = logging.getLogger(__name__)

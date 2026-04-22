@@ -6,7 +6,9 @@ from __future__ import annotations
 
 from bot.config import get_config
 from bot.modules.subscriptions.handlers.subscriptions import COMMANDS as _SUB_COMMANDS
-from bot.modules.subscriptions.handlers.subscriptions import register as _reg_subscriptions
+from bot.modules.subscriptions.handlers.subscriptions import (
+    register as _reg_subscriptions,
+)
 
 
 class SubscriptionsModule:
