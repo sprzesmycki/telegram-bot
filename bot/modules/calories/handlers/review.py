@@ -70,12 +70,12 @@ async def _gather_day_data(
             totals["protein_g"] += m.get("protein_g") or 0
             totals["carbs_g"] += m.get("carbs_g") or 0
             totals["fat_g"] += m.get("fat_g") or 0
-        for l in liquids:
-            totals["calories"] += l.get("calories") or 0
-            totals["protein_g"] += l.get("protein_g") or 0
-            totals["carbs_g"] += l.get("carbs_g") or 0
-            totals["fat_g"] += l.get("fat_g") or 0
-            hydration += l.get("amount_ml") or 0
+        for liq in liquids:
+            totals["calories"] += liq.get("calories") or 0
+            totals["protein_g"] += liq.get("protein_g") or 0
+            totals["carbs_g"] += liq.get("carbs_g") or 0
+            totals["fat_g"] += liq.get("fat_g") or 0
+            hydration += liq.get("amount_ml") or 0
         supplements_scheduled = []
         taken_names = []
 

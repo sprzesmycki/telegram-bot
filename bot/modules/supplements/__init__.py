@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from bot.config import get_config
-from bot.modules.supplements.handlers.supplements import COMMANDS, register as _reg_supplements
+from bot.modules.supplements.handlers.supplements import COMMANDS
+from bot.modules.supplements.handlers.supplements import register as _reg_supplements
 
 
 class SupplementsModule:

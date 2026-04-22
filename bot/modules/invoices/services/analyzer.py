@@ -90,6 +90,7 @@ async def analyze_invoice(raw_bytes: bytes, ext: str, mime_type: str) -> dict:
         ]
     elif mime_type == "application/pdf" or ext.lower() == ".pdf":
         import io
+
         import pypdf
         try:
             reader = pypdf.PdfReader(io.BytesIO(raw_bytes))

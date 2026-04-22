@@ -15,7 +15,7 @@ from pathlib import Path
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build, Resource
+from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
 logger = logging.getLogger(__name__)

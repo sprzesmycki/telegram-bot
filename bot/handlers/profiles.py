@@ -7,7 +7,7 @@ from telegram.ext import CommandHandler, ContextTypes
 
 from bot.services import db
 from bot.utils.formatting import format_profile_list, parse_target
-from bot.utils.nutrition import calculate_bmr, calculate_tdee, calculate_macros
+from bot.utils.nutrition import calculate_bmr, calculate_macros, calculate_tdee
 
 logger = logging.getLogger(__name__)
 
@@ -165,11 +165,16 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if not all([h, w, age, gender, activity]):
             missing = []
-            if not h: missing.append("height")
-            if not w: missing.append("weight")
-            if not age: missing.append("age")
-            if not gender: missing.append("gender")
-            if not activity: missing.append("activity")
+            if not h:
+                missing.append("height")
+            if not w:
+                missing.append("weight")
+            if not age:
+                missing.append("age")
+            if not gender:
+                missing.append("gender")
+            if not activity:
+                missing.append("activity")
             
             await update.message.reply_text(
                 f"Profile '{name}' is missing: {', '.join(missing)}.\n"

@@ -151,8 +151,8 @@ def remove_supplement_reminder(
 
 async def load_all_reminders(scheduler: AsyncIOScheduler, bot) -> None:
     """Load all active supplements and generic reminders from DB and register jobs."""
-    from bot.services import db
     from bot.config import get_config
+    from bot.services import db
 
     cfg = get_config()
     if cfg.modules.supplements.enabled:

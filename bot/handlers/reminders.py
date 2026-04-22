@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime, time as dt_time, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import Update

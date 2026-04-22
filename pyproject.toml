@@ -25,7 +25,12 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.15.5",
 ]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501", "E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

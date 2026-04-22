@@ -9,7 +9,6 @@ from bot.modules.invoices.services.summary import (
     build_month_summary,
 )
 
-
 # ---------------------------------------------------------------------------
 # _parse_schedule_time
 # ---------------------------------------------------------------------------

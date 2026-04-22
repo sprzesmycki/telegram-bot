@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 def calculate_bmr(
     weight_kg: float, height_cm: float, age: int, gender: str
 ) -> float:

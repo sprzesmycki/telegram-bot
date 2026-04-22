@@ -43,9 +43,9 @@ def _register_daily_summary(scheduler: AsyncIOScheduler, bot, time_str: str) -> 
     hour, minute = _parse_schedule_time(time_str, "daily_summary_time")
 
     async def _send_summaries() -> None:
+        from bot.config import get_config
         from bot.modules.calories.handlers.summary import send_daily_summary
         from bot.services import db
-        from bot.config import get_config
         cfg = get_config()
 
         seen_owners: set[int] = set()
