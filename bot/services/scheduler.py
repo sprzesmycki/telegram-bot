@@ -117,7 +117,7 @@ def schedule_snooze_supplement(
 ) -> None:
     """Schedule a one-shot reminder 1 hour from now for *supplement*."""
     run_at = datetime.now(WARSAW) + timedelta(hours=1)
-    job_id = f"snooze_sup_{supplement['id']}_{owner_id}"
+    job_id = f"snooze_sup_{supplement['id']}_{owner_id}_{int(run_at.timestamp())}"
 
     async def _send_snooze() -> None:
         await send_supplement_reminder(bot, supplement, owner_id)
@@ -271,7 +271,7 @@ def schedule_snooze_reminder(
     rid = reminder["id"]
     message = reminder["message"]
     run_at = datetime.now(WARSAW) + timedelta(hours=1)
-    job_id = f"snooze_reminder_{rid}_{owner_id}"
+    job_id = f"snooze_reminder_{rid}_{owner_id}_{int(run_at.timestamp())}"
     keyboard = _build_reminder_keyboard(rid)
 
     async def _send_snooze() -> None:

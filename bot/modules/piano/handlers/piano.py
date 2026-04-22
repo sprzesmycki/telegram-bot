@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import date, datetime
 
-from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from bot.services import db
 from bot.services.llm import LLMParseError
@@ -169,6 +170,14 @@ async def _piano_session_router(
 
 
 async def _piano_session_start(update: Update, owner_id: int) -> None:
+    existing = await db.get_active_piano_session(owner_id)
+    if existing:
+        elapsed = round((datetime.now(db.WARSAW) - existing).total_seconds() / 60)
+        await update.message.reply_text(
+            f"\u23f1\ufe0f Session already active (started {existing.strftime('%H:%M')}, "
+            f"{elapsed} min ago). Use `/piano session stop` to end it first."
+        )
+        return
     started_at = await db.start_piano_session(owner_id)
     time_str = started_at.strftime("%H:%M")
     await update.message.reply_text(
@@ -199,6 +208,7 @@ async def _piano_session_stop(
         # No pieces specified, ask for them.
         context.user_data["pending_piano_log_duration"] = duration_minutes
         context.user_data["pending_piano_log"] = True
+        context.user_data["pending_piano_log_ts"] = time.time()
         await update.message.reply_text(
             f"\u23f1\ufe0f Session stopped. Duration: {duration_minutes} min.\n"
             "What pieces did you practice? (Reply with titles, or `none` if just exercises)"
@@ -267,6 +277,7 @@ async def _piano_log(
     body = _strip_subcommand(text, 2)  # strip "/piano log"
     if not body:
         context.user_data["pending_piano_log"] = True
+        context.user_data["pending_piano_log_ts"] = time.time()
         await update.message.reply_text(
             "How long did you practice and what pieces? "
             "Reply like `30 min Chopin Nocturne, scales`."
@@ -457,11 +468,32 @@ async def _piano_piece_remove(update: Update, owner_id: int, body: str) -> None:
     if piece is None:
         await update.message.reply_text(f"Piece '{body}' not found.")
         return
-    ok = await db.remove_piano_piece(owner_id, piece["id"])
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🗑️ Remove", callback_data=f"piano_remove_confirm:{piece['id']}"),
+        InlineKeyboardButton("✖️ Cancel", callback_data="piano_remove_cancel"),
+    ]])
+    await update.message.reply_text(
+        f"Remove '{piece['title']}' from repertoire?",
+        reply_markup=keyboard,
+    )
+
+
+async def _piano_remove_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    owner_id = update.effective_user.id
+    piece_id = int(query.data.split(":", 1)[1])
+    ok = await db.remove_piano_piece(owner_id, piece_id)
     if ok:
-        await update.message.reply_text(f"Removed '{piece['title']}'.")
+        await query.edit_message_text("🗑️ Piece removed.")
     else:
-        await update.message.reply_text(f"Could not remove '{body}'.")
+        await query.edit_message_text("Could not remove piece (not found or already removed).")
+
+
+async def _piano_remove_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Removal cancelled.")
 
 
 async def _match_piece_prefix(
@@ -729,11 +761,19 @@ async def piano_text_dispatch(
     if not context.user_data.get("pending_piano_log"):
         return False
 
+    ts = context.user_data.get("pending_piano_log_ts", 0)
+    if time.time() - ts > 1800:
+        context.user_data.pop("pending_piano_log", None)
+        context.user_data.pop("pending_piano_log_duration", None)
+        context.user_data.pop("pending_piano_log_ts", None)
+        return False
+
     body = (update.message.text or "").strip()
     if not body:
         return False
 
     del context.user_data["pending_piano_log"]
+    context.user_data.pop("pending_piano_log_ts", None)
     duration_override = context.user_data.pop("pending_piano_log_duration", None)
     owner_id = update.effective_user.id
     await _ingest_log(update, owner_id, body, duration_override=duration_override)
@@ -755,3 +795,5 @@ def register(app) -> None:
     app.add_handler(
         MessageHandler(filters.VOICE | filters.AUDIO, piano_voice_handler)
     )
+    app.add_handler(CallbackQueryHandler(_piano_remove_confirm_callback, pattern=r"^piano_remove_confirm:"))
+    app.add_handler(CallbackQueryHandler(_piano_remove_cancel_callback, pattern=r"^piano_remove_cancel$"))

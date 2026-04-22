@@ -7,6 +7,7 @@ so ``yes_cmd`` / ``refine_handler`` in ``calories.py`` can take over.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 
 from telegram import Update
@@ -76,6 +77,7 @@ async def liquid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "drunk_at": drunk_at,
         "profiles": profiles,
         "result": result,
+        "_ts": time.time(),
     }
     context.user_data["pending_meal"] = pending
     await _send_preview(update, pending)

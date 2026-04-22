@@ -68,7 +68,6 @@ def _register_mail_check(scheduler: AsyncIOScheduler, bot, interval_minutes: int
             )
         except Exception:
             logger.error("Gmail scheduler: fetch error", exc_info=True)
-            _last_seen_count = count
             return
 
         owner_ids = await db.get_distinct_profile_owner_ids()

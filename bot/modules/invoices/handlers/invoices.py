@@ -206,23 +206,35 @@ async def _do_save(
     tmp_file_path = (await db.get_pending_invoice(pending_id, owner_id))["tmp_file_path"]
     tmp_path = Path(tmp_file_path) if tmp_file_path else None
 
+    final_path: Path | None = None
+    file_moved = False
+
     if tmp_path:
         ext = tmp_path.suffix
-        final_path = _make_final_path(result, ext)
+        candidate_path = _make_final_path(result, ext)
         try:
             if source in ("gmail", "catalog"):
-                shutil.copy2(str(tmp_path), final_path)
+                shutil.copy2(str(tmp_path), candidate_path)
             else:
-                tmp_path.rename(final_path)
+                tmp_path.rename(candidate_path)
+            final_path = candidate_path
+            file_moved = True
         except Exception as exc:
             logger.error("Failed to save invoice file: %s", exc)
             final_path = tmp_path
-    else:
-        final_path = None
 
-    await db.log_invoice(
-        owner_id, result, str(final_path) if final_path else "", source, gmail_message_id, original_filename
-    )
+    try:
+        await db.log_invoice(
+            owner_id, result, str(final_path) if final_path else "", source, gmail_message_id, original_filename
+        )
+    except Exception:
+        if file_moved and final_path and tmp_path and final_path != tmp_path:
+            try:
+                final_path.rename(tmp_path)
+            except Exception:
+                logger.error("Failed to roll back file move after DB error", exc_info=True)
+        raise
+
     await db.delete_pending_invoice(pending_id)
 
     vendor = result.get("vendor") or "Unknown"
