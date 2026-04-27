@@ -103,6 +103,9 @@ def main() -> None:
     app = (
         Application.builder()
         .token(token)
+        .read_timeout(15)
+        .write_timeout(15)
+        .connect_timeout(10)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
