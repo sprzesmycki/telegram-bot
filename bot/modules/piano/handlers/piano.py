@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import time
-from datetime import date, datetime
+from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -309,7 +309,7 @@ async def _ingest_log(
         )
         return
 
-    practiced_at = date.today()
+    practiced_at = datetime.now(db.WARSAW).date()
 
     await db.log_piano_session(
         owner_id=owner_id,
@@ -796,6 +796,10 @@ COMMANDS: list[tuple[str, str]] = [
 ]
 
 
+async def _piano_pending_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await piano_text_dispatch(update, context)
+
+
 def register(app) -> None:
     app.add_handler(CommandHandler("piano", piano_cmd))
     app.add_handler(
@@ -803,3 +807,9 @@ def register(app) -> None:
     )
     app.add_handler(CallbackQueryHandler(_piano_remove_confirm_callback, pattern=r"^piano_remove_confirm:"))
     app.add_handler(CallbackQueryHandler(_piano_remove_cancel_callback, pattern=r"^piano_remove_cancel$"))
+    # Group 1: fires in addition to calories' group-0 text handler when both modules are enabled.
+    # When calories is disabled, this is the only handler for pending piano log replies.
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, _piano_pending_text_handler),
+        group=1,
+    )
