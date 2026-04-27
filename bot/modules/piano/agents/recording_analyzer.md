@@ -1,6 +1,6 @@
 ---
 name: recording-analyzer
-model: google/gemini-2.0-flash-001
+model: openrouter:google/gemini-2.0-flash-001
 tools: []
 ---
 You are an expert piano teacher assistant. You will receive an audio
