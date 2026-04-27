@@ -385,8 +385,22 @@ async def email_body_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     owner_id = update.effective_user.id
 
+    import asyncio
+    import os
+
     email_id = query.data.split(":", 1)[1]
     body_text = context.user_data.get("gmail_bodies", {}).get(email_id)
+    if not body_text:
+        from bot.services.gmail import fetch_email_by_id, load_gmail_service
+        credentials_path = os.getenv("GMAIL_CREDENTIALS_PATH", "./credentials.json")
+        try:
+            loop = asyncio.get_event_loop()
+            service = await loop.run_in_executor(None, lambda: load_gmail_service(credentials_path))
+            email_data = await loop.run_in_executor(None, lambda: fetch_email_by_id(service, email_id))
+            body_text = email_data.body_text if email_data else None
+        except Exception as exc:
+            logger.error("Failed to re-fetch email %s: %s", email_id, exc)
+            body_text = None
     if not body_text:
         await query.message.reply_text("❌ Email body not available. Re-run /emails and try again.")
         return
@@ -422,8 +436,10 @@ async def email_attachment_callback(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
     owner_id = update.effective_user.id
 
+    from bot.modules.gmail.handlers.emails import _inv_registry
+
     key = int(query.data.split(":", 1)[1])
-    entry = context.user_data.get("gmail_inv_paths", {}).get(key)
+    entry = _inv_registry.get(key)
     if not entry:
         await query.message.reply_text("❌ Attachment not found. Re-run /emails and try again.")
         return

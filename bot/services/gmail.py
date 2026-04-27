@@ -259,6 +259,33 @@ def fetch_unread(
     return emails
 
 
+def fetch_email_by_id(service: Resource, msg_id: str) -> EmailData | None:
+    """Fetch a single email by its Gmail message ID. Does not mark it as read."""
+    try:
+        msg = (
+            service.users()
+            .messages()
+            .get(userId="me", id=msg_id, format="full")
+            .execute()
+        )
+    except HttpError as e:
+        logger.error("Gmail messages.get %s error: %s", msg_id, e)
+        return None
+
+    headers = {
+        h["name"].lower(): h["value"]
+        for h in msg["payload"].get("headers", [])
+    }
+    body_text, _ = _extract_body_and_attachments(msg["payload"])
+    return EmailData(
+        id=msg_id,
+        sender=headers.get("from", ""),
+        subject=headers.get("subject", "(no subject)"),
+        date=headers.get("date", ""),
+        body_text=body_text.strip(),
+    )
+
+
 def get_unread_count(service: Resource, label: str) -> int:
     """Return the current unread message count for the given label."""
     try:

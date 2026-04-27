@@ -28,7 +28,7 @@ def register_all(scheduler: AsyncIOScheduler, bot) -> None:
 def _register_mail_check(scheduler: AsyncIOScheduler, bot, interval_minutes: int) -> None:
     async def _check_new_mail() -> None:
         global _last_seen_count
-        from bot.modules.gmail.handlers.emails import format_email
+        from bot.modules.gmail.handlers.emails import add_invoice_keyboard, format_email
         from bot.services import db
         from bot.services.gmail import (
             fetch_unread,
@@ -79,6 +79,7 @@ def _register_mail_check(scheduler: AsyncIOScheduler, bot, interval_minutes: int
             for email_data in emails:
                 try:
                     text, kb = format_email(email_data)
+                    kb = add_invoice_keyboard(email_data, kb)
                     await bot.send_message(
                         chat_id=owner_id,
                         text=f"📬 New email!\n\n{text}",

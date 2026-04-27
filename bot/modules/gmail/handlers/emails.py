@@ -18,6 +18,57 @@ COMMANDS: list[tuple[str, str]] = [
 
 _BODY_PREVIEW_LEN = 500
 
+# Global registry so invoice buttons work for both /emails and scheduled notifications.
+_inv_registry: dict[int, dict] = {}
+_inv_next_key: int = 0
+
+
+def add_invoice_keyboard(
+    email_data,
+    kb: InlineKeyboardMarkup | None,
+    *,
+    apple_auto_queue: list | None = None,
+) -> InlineKeyboardMarkup | None:
+    """Append invoice action buttons to an email keyboard.
+
+    PDF attachments get a per-key entry in _inv_registry (looked up by the callback handler).
+    Apple invoices get a button unless apple_auto_queue is provided, in which case the email
+    id is appended there instead (used by /emails auto-process mode).
+    """
+    global _inv_next_key
+    cfg = get_config()
+    if not cfg.modules.invoices.enabled:
+        return kb
+
+    inv_rows = []
+    for att in email_data.attachments:
+        if att.local_path and att.filename.lower().endswith(".pdf"):
+            key = _inv_next_key
+            _inv_registry[key] = {"path": att.local_path, "gmail_id": email_data.id}
+            _inv_next_key += 1
+            label = att.filename[:40]
+            inv_rows.append(
+                [InlineKeyboardButton(f"🧾 Invoice: {label}", callback_data=f"inv_email:{key}")]
+            )
+
+    is_apple = (
+        not inv_rows
+        and email_data.body_text
+        and "your invoice from apple" in email_data.subject.lower()
+    )
+    if is_apple:
+        if apple_auto_queue is not None:
+            apple_auto_queue.append(email_data.id)
+        else:
+            inv_rows.append(
+                [InlineKeyboardButton("🧾 Parse Apple invoice", callback_data=f"inv_body:{email_data.id}")]
+            )
+
+    if inv_rows:
+        existing = list(kb.inline_keyboard) if kb else []
+        return InlineKeyboardMarkup(existing + inv_rows)
+    return kb
+
 
 def format_email(email_data, preview_only: bool = True) -> tuple[str, InlineKeyboardMarkup | None]:
     """Return (message_text, optional_keyboard) for an EmailData object."""
@@ -97,51 +148,14 @@ async def emails_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("📭 No unread emails.")
         return
 
-    invoices_enabled = cfg.modules.invoices.enabled
-    auto_process = invoices_enabled and cfg.modules.gmail.auto_process_invoices
+    auto_process = cfg.modules.invoices.enabled and cfg.modules.gmail.auto_process_invoices
+    apple_auto_queue: list[str] = [] if auto_process else None
     context.user_data.setdefault("gmail_bodies", {})
-    context.user_data.setdefault("gmail_inv_paths", {})
-    inv_key = context.user_data.get("gmail_inv_next_key", 0)
-    apple_auto_queue: list[str] = []
 
     for email_data in emails:
         context.user_data["gmail_bodies"][email_data.id] = email_data.body_text
         text, kb = format_email(email_data)
-
-        # Add "Process as invoice" button for PDF attachments or Apple body invoices
-        if invoices_enabled:
-            inv_rows = []
-            for att in email_data.attachments:
-                if att.local_path and att.filename.lower().endswith(".pdf"):
-                    context.user_data["gmail_inv_paths"][inv_key] = {
-                        "path": att.local_path,
-                        "gmail_id": email_data.id,
-                    }
-                    label = att.filename[:40]
-                    inv_rows.append(
-                        [InlineKeyboardButton(f"🧾 Invoice: {label}", callback_data=f"inv_email:{inv_key}")]
-                    )
-                    inv_key += 1
-
-            # Apple sends invoice details in the email body, never as a PDF attachment
-            is_apple = (
-                not inv_rows
-                and email_data.body_text
-                and "your invoice from apple" in email_data.subject.lower()
-            )
-            if is_apple:
-                if auto_process:
-                    apple_auto_queue.append(email_data.id)
-                else:
-                    inv_rows.append(
-                        [InlineKeyboardButton("🧾 Parse Apple invoice", callback_data=f"inv_body:{email_data.id}")]
-                    )
-
-            if inv_rows:
-                existing = list(kb.inline_keyboard) if kb else []
-                kb = InlineKeyboardMarkup(existing + inv_rows)
-
-        context.user_data["gmail_inv_next_key"] = inv_key
+        kb = add_invoice_keyboard(email_data, kb, apple_auto_queue=apple_auto_queue)
         await update.message.reply_text(text, reply_markup=kb)
 
     if apple_auto_queue:
