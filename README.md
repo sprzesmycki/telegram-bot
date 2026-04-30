@@ -117,9 +117,11 @@ Disabling a module removes its commands from the bot and stops its scheduled job
 | `/remind add once tomorrow\|YYYY-MM-DD <HH:MM> <message>` | One-time on a specific date |
 | `/remind list` | List all active reminders |
 | `/remind remove <id>` | Delete a reminder by ID |
-| `/piano` | Piano summary: streak, pieces in progress, last session |
+| `/piano` | Piano summary: streak (with minutes & freeze badge), pieces in progress, last session time |
 | `/piano log [N min] [pieces…]` | Log today's practice; updates streak |
 | `/piano checkin [note]` | LLM coaching check-in (cheap model) |
+| `/piano streak` | Streak details: current, longest, minutes, credits, freeze status, next milestone |
+| `/piano streak freeze [N]` | Freeze streak for N days (1–14, default 3) to cover travel |
 | `/piano pieces` | List your repertoire grouped by status |
 | `/piano piece add\|status\|note\|remove <title>` | Manage pieces |
 | `/piano analyze [piece title]` | Analyse the last voice note you sent (feedback) |
