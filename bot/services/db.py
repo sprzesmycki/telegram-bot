@@ -820,6 +820,8 @@ async def get_piano_streak(owner_id: int) -> dict:
         "current_streak": 0,
         "longest_streak": 0,
         "last_practiced_date": None,
+        "freeze_credits": 0,
+        "freeze_until": None,
     }
 
 
@@ -828,19 +830,37 @@ async def upsert_piano_streak(
     current_streak: int,
     longest_streak: int,
     last_practiced_date: date | None,
+    freeze_credits: int = 0,
+    freeze_until: date | None = None,
 ) -> None:
     await _pool_or_raise().execute(
         """
         INSERT INTO piano_streak
-            (owner_user_id, current_streak, longest_streak, last_practiced_date)
-        VALUES ($1, $2, $3, $4)
+            (owner_user_id, current_streak, longest_streak, last_practiced_date,
+             freeze_credits, freeze_until)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT(owner_user_id) DO UPDATE SET
             current_streak      = EXCLUDED.current_streak,
             longest_streak      = EXCLUDED.longest_streak,
-            last_practiced_date = EXCLUDED.last_practiced_date
+            last_practiced_date = EXCLUDED.last_practiced_date,
+            freeze_credits      = EXCLUDED.freeze_credits,
+            freeze_until        = EXCLUDED.freeze_until
         """,
         owner_id, current_streak, longest_streak, last_practiced_date,
+        freeze_credits, freeze_until,
     )
+
+
+async def get_streak_minutes(owner_id: int, streak_start: date) -> int:
+    val = await _pool_or_raise().fetchval(
+        """
+        SELECT COALESCE(SUM(duration_minutes), 0)::INTEGER
+        FROM piano_sessions
+        WHERE owner_user_id = $1 AND practiced_at >= $2
+        """,
+        owner_id, streak_start,
+    )
+    return int(val or 0)
 
 
 # ---------------------------------------------------------------------------

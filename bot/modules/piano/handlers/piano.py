@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -30,6 +30,8 @@ USAGE = (
     "/piano session stop [pieces]        — stop timer and log\n"
     "/piano log [N] [piece1, piece2]     — log today's practice (N in mins)\n"
     "/piano checkin [note]               — coaching check-in\n"
+    "/piano streak                       — streak details & protection status\n"
+    "/piano streak freeze [N]            — freeze streak for N days (max 14, default 3)\n"
     "/piano pieces                       — list your repertoire\n"
     "/piano piece add <title> [by <composer>]\n"
     "/piano piece status <title> <learning|polishing|mastered|needs_review>\n"
@@ -132,6 +134,8 @@ async def piano_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _piano_session_router(update, context, owner_id, args, text)
     elif sub == "checkin":
         await _piano_checkin(update, owner_id, args, text)
+    elif sub == "streak":
+        await _piano_streak_cmd(update, owner_id, args)
     elif sub == "pieces":
         await _piano_pieces_list(update, owner_id)
     elif sub == "piece":
@@ -230,15 +234,41 @@ async def _piano_session_stop(
 # ---------------------------------------------------------------------------
 
 
+def _format_logged_at(logged_at, today: date) -> str:
+    if logged_at is None:
+        return "unknown time"
+    if hasattr(logged_at, "astimezone"):
+        dt = logged_at.astimezone(db.WARSAW)
+    else:
+        dt = logged_at
+    d = dt.date() if hasattr(dt, "date") else today
+    time_str = dt.strftime("%H:%M")
+    if d == today:
+        return f"Today at {time_str}"
+    if d == today - timedelta(days=1):
+        return f"Yesterday at {time_str}"
+    return f"{d.strftime('%d %b')} at {time_str}"
+
+
 async def _piano_summary(update: Update, owner_id: int) -> None:
     streak = await db.get_piano_streak(owner_id)
     pieces = await db.list_piano_pieces(owner_id)
     sessions = await db.list_piano_sessions(owner_id, limit=1)
     active_start = await db.get_active_piano_session(owner_id)
 
-    lines: list[str] = []
     current = int(streak.get("current_streak") or 0)
-    lines.append(coach.format_streak(current))
+    freeze_until = streak.get("freeze_until")
+
+    streak_minutes: int | None = None
+    if current > 0:
+        last_date = streak.get("last_practiced_date")
+        if last_date:
+            last_d = last_date if isinstance(last_date, date) else date.fromisoformat(str(last_date))
+            streak_start = last_d - timedelta(days=current - 1)
+            streak_minutes = await db.get_streak_minutes(owner_id, streak_start)
+
+    lines: list[str] = []
+    lines.append(coach.format_streak(current, streak_minutes=streak_minutes, freeze_until=freeze_until))
 
     in_progress = repertoire.summarize_in_progress(pieces)
     lines.append(f"In progress: {in_progress}")
@@ -248,6 +278,7 @@ async def _piano_summary(update: Update, owner_id: int) -> None:
         elapsed = round((now - active_start).total_seconds() / 60)
         lines.append(f"\u23f1\ufe0f Active session: {elapsed} min (started {active_start.strftime('%H:%M')})")
 
+    today = datetime.now(db.WARSAW).date()
     if sessions:
         last = sessions[0]
         pieces_str = ", ".join(last["pieces_practiced"]) or "unspecified"
@@ -255,7 +286,8 @@ async def _piano_summary(update: Update, owner_id: int) -> None:
             f"{last['duration_minutes']} min"
             if last.get("duration_minutes") else "duration n/a"
         )
-        lines.append(f"Last session: {last['practiced_at']} — {duration} ({pieces_str})")
+        when = _format_logged_at(last.get("logged_at"), today)
+        lines.append(f"Last session: {when} — {duration} ({pieces_str})")
     else:
         lines.append("No sessions logged yet. Use /piano log to start.")
 
@@ -328,14 +360,78 @@ async def _ingest_log(
 
     streak = await streaks.compute_and_update_streak(owner_id, practiced_at)
 
+    current = int(streak.get("current_streak") or 0)
+    streak_minutes: int | None = None
+    if current > 0:
+        streak_start = practiced_at - timedelta(days=current - 1)
+        streak_minutes = await db.get_streak_minutes(owner_id, streak_start)
+
     try:
         reply = await coach.summarize_log(owner_id, duration, pieces_practiced, notes)
     except Exception as exc:
         logger.warning("piano summarize_log failed: %s", exc)
         reply = "Nice session — keep it going."
 
-    header = coach.format_streak(int(streak.get("current_streak") or 0))
+    freeze_until = streak.get("freeze_until")
+    header = coach.format_streak(current, streak_minutes=streak_minutes, freeze_until=freeze_until)
     await update.message.reply_text(f"{header}\n\n{reply}")
+
+
+# ---------------------------------------------------------------------------
+# /piano streak [freeze N]
+# ---------------------------------------------------------------------------
+
+
+async def _piano_streak_cmd(update: Update, owner_id: int, args: list[str]) -> None:
+    if len(args) >= 2 and args[1].lower() == "freeze":
+        days = 3
+        if len(args) >= 3:
+            try:
+                days = max(1, min(int(args[2]), 14))
+            except ValueError:
+                await update.message.reply_text("Usage: /piano streak freeze [days] (1–14)")
+                return
+        result = await streaks.activate_freeze(owner_id, days)
+        until = result.get("freeze_until")
+        await update.message.reply_text(
+            f"\U0001f6e1️ Streak frozen until {until}. "
+            f"Practice any day before then to resume normally."
+        )
+        return
+
+    streak = await db.get_piano_streak(owner_id)
+    current = int(streak.get("current_streak") or 0)
+    longest = int(streak.get("longest_streak") or 0)
+    credits = int(streak.get("freeze_credits") or 0)
+    freeze_until = streak.get("freeze_until")
+
+    streak_minutes = 0
+    next_milestone: int | None = None
+    if current > 0:
+        last_date = streak.get("last_practiced_date")
+        if last_date:
+            last_d = last_date if isinstance(last_date, date) else date.fromisoformat(str(last_date))
+            streak_start = last_d - timedelta(days=current - 1)
+            streak_minutes = await db.get_streak_minutes(owner_id, streak_start)
+        next_milestone = ((current // 7) + 1) * 7
+
+    lines = ["\U0001f3b9 Streak details"]
+    lines.append(f"Current streak: {current} day{'s' if current != 1 else ''}")
+    lines.append(f"Longest streak: {longest} day{'s' if longest != 1 else ''}")
+    if current > 0:
+        lines.append(f"Minutes this streak: {streak_minutes}")
+    lines.append(f"Freeze credits: \U0001f6e1️ {credits}/2")
+    if freeze_until:
+        lines.append(f"Travel freeze active until: {freeze_until}")
+    if next_milestone and credits < 2:
+        lines.append(f"Next credit at: day {next_milestone}")
+    lines.append("")
+    lines.append("Protection rules:")
+    lines.append("  • Miss 1 day — always free")
+    lines.append("  • Miss 2+ days — costs 1 credit per extra day")
+    lines.append("  • /piano streak freeze [N] — travel freeze (max 14 days)")
+
+    await update.message.reply_text("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------

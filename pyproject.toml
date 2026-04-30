@@ -25,6 +25,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.15.5",
 ]
 
@@ -34,3 +35,44 @@ ignore = ["E501", "E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["bot"]
+# Exclude code that requires Telegram, DB, LLM, or scheduler at import/run time.
+# These can only be tested via integration tests; unit-test coverage of them is
+# meaningless and drags the headline number down.
+omit = [
+    # Telegram handler code — needs Update/Context objects
+    "bot/handlers/*.py",
+    "bot/modules/*/handlers/*.py",
+    # DB layer — needs a live asyncpg pool
+    "bot/services/db.py",
+    # External service clients
+    "bot/services/llm.py",
+    "bot/services/gmail.py",
+    "bot/services/scheduler.py",
+    "bot/services/agent_runner.py",
+    # LLM-backed services (no pure logic worth isolating)
+    "bot/modules/piano/services/audio_agent.py",
+    "bot/modules/piano/services/coach.py",  # build_coach_context/run_checkin/summarize_log need DB+LLM
+    "bot/modules/invoices/services/analyzer.py",
+    # Scheduled jobs — need scheduler + bot instance
+    "bot/modules/*/scheduled.py",
+    # Module loaders and entry-point wiring
+    "bot/modules/__init__.py",
+    "bot/modules/core/__init__.py",
+    "bot/modules/gmail/__init__.py",
+    "bot/modules/gmail/handlers/*.py",
+    "bot/modules/subscriptions/__init__.py",
+    "bot/modules/subscriptions/handlers/*.py",
+    "bot/modules/supplements/__init__.py",
+    "bot/tools/__init__.py",
+    # Infra / setup
+    "bot/utils/logging_config.py",
+    "bot/utils/storage.py",
+    "main.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

@@ -8,12 +8,23 @@ from bot.services import db
 logger = logging.getLogger(__name__)
 
 
-def format_streak(current_streak: int) -> str:
+def format_streak(
+    current_streak: int,
+    streak_minutes: int | None = None,
+    freeze_until=None,
+) -> str:
     if current_streak <= 0:
         return "No active streak — today is a good day to start."
     if current_streak == 1:
-        return "\U0001f525 Day 1 — nice start!"
-    return f"\U0001f525 Day {current_streak} in a row! Keep it up."
+        base = "\U0001f525 Day 1 — nice start!"
+    else:
+        base = f"\U0001f525 Day {current_streak} in a row!"
+    extras: list[str] = []
+    if streak_minutes:
+        extras.append(f"{streak_minutes} min this streak")
+    if freeze_until:
+        extras.append(f"\U0001f6e1️ freeze until {freeze_until}")
+    return base + (f" — {', '.join(extras)}" if extras else "")
 
 
 async def build_coach_context(owner_id: int) -> dict:
