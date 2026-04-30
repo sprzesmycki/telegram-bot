@@ -71,7 +71,7 @@ Features are organised as optional modules, toggled in `config.yaml`:
 
 ```yaml
 modules:
-  calories:
+  food:
     enabled: true
     schedules:
       daily_summary_time: "21:00"
@@ -97,12 +97,13 @@ Disabling a module removes its commands from the bot and stops its scheduled job
 
 | Command | Description |
 |---------|-------------|
-| `/cal <description> [@name\|@both] [at HH:MM]` | Analyse a meal (text or photo); shows preview |
-| `/recipe <URL or text> [for N] [@name\|@both]` | Analyse a recipe; shows preview |
-| `/yes` | Confirm and log the pending meal/recipe |
+| `/log [description] [@name\|@both] [at HH:MM]` | Log a meal or drink (AI or step-by-step); shows preview |
+| `/recipe <URL or text> [for N] [@name\|@both]` | Analyse a recipe; shows preview (requires `ai_analysis: true`) |
+| `/yes` | Confirm pending preview, or skip remaining optional fields in manual flow |
 | `/cancel` | Discard the active pending preview or piano log prompt |
-| _(plain text)_ | Refine the pending preview (e.g. "add butter", "larger portion") |
+| _(plain text)_ | Refine pending AI preview, or answer the current step in manual flow |
 | `/today [@name\|@both]` | List today's meals & drinks with inline ❌ delete buttons |
+| `/today full [@name\|@both]` | Same, but also sends stored photos for each meal entry |
 | `/summary [@name]` | Today's meal summary |
 | `/week [@name]` | Last 7 days overview |
 | `/report [@name] [YYYY-MM-DD]` | Dietitian-ready daily report |
@@ -177,49 +178,52 @@ The first `/profile add` auto-creates a default `Me` profile alongside yours, so
 
 Setting a manual `/goal` resets macro targets to "untracked" mode (calories only).
 
-**3. Log meals (preview → approve or refine)**
+**3. Log meals and drinks**
+
+`/log` is the unified entry point for all food and drink logging. Its behaviour depends on `modules.food.ai_analysis` in `config.yaml`.
+
+**With `ai_analysis: true` (default):**
 
 ```
-/cal scrambled eggs with toast and orange juice
-/cal banana at 07:30
-/cal chicken salad @Wife
-/cal slice of pizza @both
+/log scrambled eggs with toast and orange juice
+/log banana at 07:30
+/log chicken salad @Wife
+/log slice of pizza @both
 ```
 
-Or send a photo with a caption (or no caption at all). The bot downloads, compresses, and runs vision analysis.
-
-Every `/cal` (text or photo) replies with a **preview**, not a log — nothing is saved until you confirm:
+After `/log`, the bot asks whether it's a meal or drink (inline buttons), then runs AI analysis and shows a preview. Nothing is saved until you confirm with `/yes`. You can send a plain-text remark to refine before confirming:
 
 ```
-Preview — will log to: Me at 13:05
-Scrambled eggs with toast
-Jajecznica z tostem
-420 kcal | P: 22g | C: 35g | F: 18g
-
-Reply /yes to log, or send a remark to refine.
-Example: "actually larger portion" or "add a tablespoon of butter".
-```
-
-Descriptions are always bilingual (English / Polish) in separate lines. To approve, reply `/yes`. To adjust, send a plain-text remark and the bot re-analyses:
-
-```
-you: /cal scrambled eggs
-bot: Preview — ... Scrambled eggs ... 180 kcal ...
+you: /log scrambled eggs
+bot: 🍽 Posiłek / Meal  🥤 Napój / Drink
+     [tap Meal]
+bot: Preview — Scrambled eggs ... 180 kcal ...
 you: that's 3 eggs with butter and a slice of cheddar
-bot: Preview — ... Scrambled eggs with butter and cheddar ... 350 kcal ...
+bot: Preview — Scrambled eggs with butter and cheddar ... 350 kcal ...
 you: /yes
-bot: [Me] Logged: Scrambled eggs with butter and cheddar
-Jajecznica z masłem i cheddarem ...
-Daily: 350 / 2200 kcal (1850 remaining)
-P: 25 / 170g | C: 5 / 230g | F: 25 / 85g
+bot: [Me] Logged: Scrambled eggs with butter and cheddar ...
 ```
 
-Caption examples for photos:
+Or send a photo (with or without a caption). The bot saves it, asks meal/drink, then analyses with vision.
 
-- `/cal` — just analyse the photo
-- `/cal at 13:00` — analyse photo, backdate to 13:00
-- `/cal toast with potato, cheese and ham` — the caption is treated as an authoritative hint about ingredients, which is especially useful for dishes where the layers or fillings aren't visible (sandwiches, wraps, stuffed pastries, casseroles)
-- `/cal chicken curry with rice @Wife at 12:30` — full combo: hint + target profile + time
+**With `ai_analysis: false`:**
+
+The bot guides you through a step-by-step flow. Only description is required — all macros are optional. Send `/yes` at any point to log with whatever has been collected:
+
+```
+you: /log
+bot: Co jadłeś/piłeś? / What did you eat or drink?
+you: owsianka z bananem
+bot: 🍽 Posiłek / Meal  🥤 Napój / Drink
+     [tap Meal]
+bot: Kcal? (Pomiń → /yes / Skip → /yes)
+you: 380
+bot: Białko (g) / Protein (g)? ...
+you: /yes
+bot: [Me] Logged: owsianka z bananem — 380 kcal ...
+```
+
+Photos are saved and then trigger the same step-by-step flow.
 
 **4. Log a recipe**
 
@@ -228,12 +232,13 @@ Caption examples for photos:
 /yes
 ```
 
-`/recipe` shows per-serving macros with a bilingual dish name; `/yes` logs one serving to your active profile. Same as `/cal`, you can also send a plain-text remark to refine (e.g. "use half the oil", "add 200g chicken breast") before confirming.
+`/recipe` shows per-serving macros with a bilingual dish name; `/yes` logs one serving to your active profile. You can send a plain-text remark to refine (e.g. "use half the oil", "add 200g chicken breast") before confirming. Requires `ai_analysis: true`.
 
 **5. Check progress**
 
 ```
 /today
+/today full
 /today @both
 /summary
 /summary @Wife
@@ -244,9 +249,11 @@ Caption examples for photos:
 /review @Seba 2026-04-11
 ```
 
-`/today` lists every meal and drink logged today for the targeted profile, numbered and ordered by time, with an inline `❌ N` button per entry. Tapping one hard-deletes that row from Postgres and re-renders the message with updated totals — useful for backing out a mistaken `/cal` or recipe log.
+`/today` lists every meal and drink logged today, numbered and ordered by time, with an inline `❌ N` delete button per entry. `/today full` additionally sends stored photos for each meal entry that has one, before the text list.
 
-`/review` sends the day's full data (meals, drinks, totals vs. goal, hydration, supplement compliance) to the active LLM and replies with a short coach-style review: **✅ Wins**, **⚠️ Concerns**, **➡️ Tomorrow** — every bullet bilingual (EN / PL). It also fires automatically once per day at `modules.calories.daily_review_time` (default `22:00`), one message per profile, skipping profiles with nothing logged that day. Pass `YYYY-MM-DD` to review a past date (supplement compliance is only included for today).
+`/review` sends the day's full data (meals, drinks, totals vs. goal, hydration, supplement compliance) to the active LLM and replies with a short coach-style review: **✅ Wins**, **⚠️ Concerns**, **➡️ Tomorrow** — every bullet bilingual (EN / PL). It also fires automatically once per day at `modules.food.daily_review_time` (default `22:00`), one message per profile, skipping profiles with nothing logged that day. Pass `YYYY-MM-DD` to review a past date (supplement compliance is only included for today).
+
+`/review` sends the day's full data (meals, drinks, totals vs. goal, hydration, supplement compliance) to the active LLM and replies with a short coach-style review: **✅ Wins**, **⚠️ Concerns**, **➡️ Tomorrow** — every bullet bilingual (EN / PL). It also fires automatically once per day at `modules.food.daily_review_time` (default `22:00`), one message per profile, skipping profiles with nothing logged that day. Pass `YYYY-MM-DD` to review a past date (supplement compliance is only included for today).
 
 **6. Supplements**
 
@@ -292,7 +299,7 @@ First form shows the current provider/model; the others switch at runtime.
 
 ## Multi-Profile Support
 
-- `@name` targets a specific profile (e.g., `/cal salad @Wife`)
+- `@name` targets a specific profile (e.g., `/log salad @Wife`)
 - `@both` logs to all profiles at once
 - Default profile "Me" is created automatically on first use
 
@@ -317,7 +324,7 @@ llm:
     - google/gemini-2.0-flash-001
 ```
 
-When set, `/cal` (text and photo) and `/review` (manual and scheduled) run all models in parallel and send one labelled message per model. The primary model's estimate is always what `/yes` confirms — compare messages are informational only.
+When set, `/log` (text and photo, AI path) and `/review` (manual and scheduled) run all models in parallel and send one labelled message per model. The primary model's estimate is always what `/yes` confirms — compare messages are informational only.
 
 ## Gmail API Setup
 
@@ -358,10 +365,10 @@ After restarting the bot, `/emails` fetches your unread messages and the schedul
 
 ```
 bot/
-  modules/        — Optional feature modules (calories, piano, invoices, core)
-    calories/
+  modules/        — Optional feature modules (food, piano, invoices, core)
+    food/
       agents/     — LLM agent .md files (meal_analyzer, day_reviewer, …)
-      handlers/   — Telegram command handlers for calories features
+      handlers/   — Telegram command handlers for food features
       scheduled.py — Cron jobs (daily summary, daily review)
     piano/
       agents/     — LLM agent .md files (practice_coach, recording_analyzer)

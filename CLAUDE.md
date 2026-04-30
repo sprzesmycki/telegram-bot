@@ -55,7 +55,7 @@ When you add, remove, or rename a user-facing feature (a command, a flow, a sche
 
 `_env(key, yaml_fallback)` in `bot/config.py` applies `.env` overlays for legacy env vars — this lets existing deployments keep working without touching `config.yaml`. Don't add new env-var config; add it to `config.yaml` instead.
 
-Key dataclass tree: `AppConfig → LLMConfig, StorageConfig, LoggingConfig, ModulesConfig → CaloriesModuleConfig, PianoModuleConfig, InvoicesModuleConfig, GmailModuleConfig`. All module-level code reads config via `get_config()` — never via `os.getenv()` for anything other than secrets.
+Key dataclass tree: `AppConfig → LLMConfig, StorageConfig, LoggingConfig, ModulesConfig → FoodModuleConfig, PianoModuleConfig, InvoicesModuleConfig, GmailModuleConfig`. All module-level code reads config via `get_config()` — never via `os.getenv()` for anything other than secrets.
 
 ### Module system (bot/modules/)
 
@@ -65,9 +65,9 @@ Features are organised as optional modules in `bot/modules/`. Each module direct
 - `register(app)` — attaches handlers to the `Application`
 - `register_scheduled(scheduler, bot)` — registers cron jobs owned by this module
 
-`bot/modules/__init__.py::load_enabled_modules()` always loads `CoreModule` (profiles, reminders, model) and conditionally loads `PianoModule`, `CaloriesModule`, `InvoicesModule`, and `GmailModule` (in that order) based on their `enabled` flags. `main.py` calls `load_enabled_modules()` and loops over the result — no explicit handler imports in `main.py`.
+`bot/modules/__init__.py::load_enabled_modules()` always loads `CoreModule` (profiles, reminders, model) and conditionally loads `PianoModule`, `FoodModule`, `InvoicesModule`, and `GmailModule` (in that order) based on their `enabled` flags. `main.py` calls `load_enabled_modules()` and loops over the result — no explicit handler imports in `main.py`.
 
-Module order matters for text-handler dispatch: piano is registered before calories so `piano_text_dispatch` gets first crack at plain-text messages (see Piano section).
+Module order matters for text-handler dispatch: piano is registered before food so `piano_text_dispatch` gets first crack at plain-text messages (see Piano section).
 
 **Adding a new module:** create `bot/modules/<name>/`, add a `*Module` class, add the config key to `config.yaml` + `ModulesConfig`, add it to `load_enabled_modules()`.
 
@@ -85,7 +85,7 @@ tools: []            # MCP-style tool names (empty = no tools)
 ```
 
 Agent files per module:
-- `bot/modules/calories/agents/` — `meal_analyzer.md`, `liquid_analyzer.md`, `recipe_analyzer.md`, `day_reviewer.md`
+- `bot/modules/food/agents/` — `meal_analyzer.md`, `liquid_analyzer.md`, `recipe_analyzer.md`, `day_reviewer.md`
 - `bot/modules/piano/agents/` — `practice_coach.md` (`model: google/gemini-flash-1.5`), `recording_analyzer.md` (`model: google/gemini-2.0-flash-001`)
 - `bot/modules/invoices/agents/` — `invoice_reader.md` (`model: local:gemma4:26b`)
 
@@ -124,15 +124,20 @@ Every query filters by `owner_user_id` (the Telegram user ID). Profiles are name
 ### LLM provider singleton
 `bot/services/llm.py` holds a module-level `(client, model, provider)` triple. `init_llm()` seeds it from `get_config().llm.*` (API keys still from `os.getenv`); `switch_provider()` swaps it in place; `get_llm_client()` returns the current pair. The `/model` command mutates this at runtime — no restart. All three providers (`openrouter`, `local`, `custom`) speak the OpenAI API via `AsyncOpenAI`, so only the `base_url` / `api_key` / `model` differ.
 
-Two bespoke exceptions drive handler UX: `VisionNotSupportedError` (raised when an image is sent to a non-vision model — we map `openai.BadRequestError` to this) and `LLMParseError` (raised after one retry of JSON parsing fails). `_handle_llm_error` in `bot/modules/calories/handlers/calories.py` centralizes the user-facing messages.
+Two bespoke exceptions drive handler UX: `VisionNotSupportedError` (raised when an image is sent to a non-vision model — we map `openai.BadRequestError` to this) and `LLMParseError` (raised after one retry of JSON parsing fails). `_handle_llm_error` in `bot/modules/food/handlers/meals.py` centralizes the user-facing messages.
 
 ### Deleting logged entries
-`/today` (in `bot/modules/calories/handlers/calories.py`) lists meals + liquids for today per profile and attaches inline `❌ N` buttons whose `callback_data` encodes the row type and DB id (`delm:<meal_id>` / `dell:<liquid_id>`). The callback handler (`today_delete_callback`, registered via `CallbackQueryHandler(pattern=r"^del[ml]:")`) hard-deletes via `db.delete_meal` / `db.delete_liquid` and re-renders the message. Ownership is enforced by passing `owner_user_id` into the DELETE `WHERE` clause — never trust the callback payload alone. Delete is **hard** (no `active` column on `meals` / `liquids`); if we later need an audit trail, add the column via a new Alembic revision and switch the DELETE to `UPDATE ... SET active = 0`.
+`/today` (in `bot/modules/food/handlers/meals.py`) lists meals + liquids for today per profile and attaches inline `❌ N` buttons whose `callback_data` encodes the row type and DB id (`delm:<meal_id>` / `dell:<liquid_id>`). The callback handler (`today_delete_callback`, registered via `CallbackQueryHandler(pattern=r"^del[ml]:")`) hard-deletes via `db.delete_meal` / `db.delete_liquid` and re-renders the message. Ownership is enforced by passing `owner_user_id` into the DELETE `WHERE` clause — never trust the callback payload alone. Delete is **hard** (no `active` column on `meals` / `liquids`); if we later need an audit trail, add the column via a new Alembic revision and switch the DELETE to `UPDATE ... SET active = 0`.
 
-### Meal analysis: preview → refine → confirm
-`/cal` and `/recipe` **never** log immediately. They stash a `pending_meal` dict in `context.user_data` and reply with a preview. Two things can happen next:
+### Food logging: two modes controlled by `modules.food.ai_analysis`
+
+**`ai_analysis: true` (default):** `/log` shows a meal/drink type selector (inline buttons), then analyses with LLM, stashes a `pending_meal` dict in `context.user_data`, and replies with a preview. Two things can happen next:
 - `/yes` → `yes_cmd` reads the pending dict and writes to Postgres via `db.log_meal` / `db.log_liquid`.
-- Any plain text → `refine_handler` (registered as `MessageHandler(filters.TEXT & ~filters.COMMAND, ...)`) appends the remark to the accumulated description and re-runs the LLM. This is why plain text in a chat has meaning only when a pending meal exists; otherwise it's a silent no-op.
+- Any plain text → `refine_handler` appends the remark and re-runs the LLM.
+
+**`ai_analysis: false`:** `/log` starts a step-by-step conversation, stashing `pending_log` in `context.user_data`. Steps: description (mandatory) → type selector → amount_ml (drink only) → kcal → protein → carbs → fat (all optional). `/yes` at any step commits with whatever has been collected, remaining fields default to 0. `refine_handler` routes text input to the current step's handler. Photos are saved then trigger the same step-by-step flow. `/recipe` replies with an "AI required" message when this flag is off.
+
+`/today full` sends stored photos for meal entries before the text list. `/today` (no args) stays text-only.
 
 LLM output is bilingual: `description_en` + `description_pl` (meals) or `dish_name_en` + `dish_name_pl` (recipes) are post-processed into a single `"<en> / <pl>"` string and stored as `description` / `dish_name`. Keep this split intact in prompts — the schema is load-bearing for both DB storage and message formatting.
 
@@ -148,7 +153,7 @@ The first `/profile add <Name>` (when `Name != "Me"`) auto-creates a `Me` profil
 `APScheduler`'s `AsyncIOScheduler` is created in `post_init`, stored on `app.bot_data["scheduler"]`, and started there. Core supplement/reminder infrastructure lives in `bot/services/scheduler.py`. On boot, `load_all_reminders` reads every active supplement from Postgres and registers a `CronTrigger` per `HH:MM` (job ID format `supplement_<id>`). `/supplement add` and `/supplement remove` incrementally add/remove jobs on this same scheduler.
 
 Scheduled cron jobs for features are registered by each module's `register_scheduled(scheduler, bot)` call in `post_init`:
-- **Calories** (`bot/modules/calories/scheduled.py`): `daily_summary` (at `modules.calories.daily_summary_time`) and `daily_review` (at `modules.calories.daily_review_time`). Both iterate distinct profile owners and skip profiles with nothing logged.
+- **Food** (`bot/modules/food/scheduled.py`): `daily_summary` (at `modules.food.daily_summary_time`) and `daily_review` (at `modules.food.daily_review_time`). Both iterate distinct profile owners and skip profiles with nothing logged.
 - **Piano** (`bot/modules/piano/scheduled.py`): `piano_checkin` (at `modules.piano.checkin_time`). Iterates piano owners and skips days already logged.
 - **Invoices** (`bot/modules/invoices/__init__.py`): one-shot `invoice_pending_cleanup` fires 5 s after startup (via `DateTrigger`) to delete stale `pending_invoices` rows and remove their tmp files.
 - **Gmail** (`bot/modules/gmail/scheduled.py`): `gmail_check` polls for new unread mail every `modules.gmail.check_interval_minutes` minutes (IntervalTrigger). Compares against a module-level `_last_seen_count`; when count rises it fetches the new messages and broadcasts to all profile owners.
@@ -156,7 +161,7 @@ Scheduled cron jobs for features are registered by each module's `register_sched
 All "iterate distinct owners" paths share the `db.get_distinct_profile_owner_ids()` helper — don't write raw `SELECT DISTINCT owner_user_id` queries in the scheduler.
 
 ### Daily AI review (`/review`)
-`/review [@name] [YYYY-MM-DD]` (in `bot/modules/calories/handlers/review.py`) gathers the day's meals, liquids, totals, goal, hydration, and (for today only) supplement compliance, then hands the payload to `llm.review_day` which loads `bot/modules/calories/agents/day_reviewer.md` and calls `run_agent`. The review is plain text with three fixed sections — `✅ Wins`, `⚠️ Concerns`, `➡️ Tomorrow` — each bullet in the form `<English> / <Polish>`. Unlike piano, there's no pinned model tier; the review uses whatever `/model` is active. `send_daily_review` is the scheduler entrypoint and returns silently for empty days. Supplement compliance uses `get_supplement_logs_today` (today-only helper), so for past-date reviews we pass empty supplement lists — if you add a per-date supplement-log query, wire it into `_gather_day_data` in `handlers/review.py`.
+`/review [@name] [YYYY-MM-DD]` (in `bot/modules/food/handlers/review.py`) gathers the day's meals, liquids, totals, goal, hydration, and (for today only) supplement compliance, then hands the payload to `llm.review_day` which loads `bot/modules/food/agents/day_reviewer.md` and calls `run_agent`. The review is plain text with three fixed sections — `✅ Wins`, `⚠️ Concerns`, `➡️ Tomorrow` — each bullet in the form `<English> / <Polish>`. Unlike piano, there's no pinned model tier; the review uses whatever `/model` is active. `send_daily_review` is the scheduler entrypoint and returns silently for empty days. Supplement compliance uses `get_supplement_logs_today` (today-only helper), so for past-date reviews we pass empty supplement lists — if you add a per-date supplement-log query, wire it into `_gather_day_data` in `handlers/review.py`.
 
 ### Piano practice coach
 Piano is **owner-scoped**, not profile-scoped (piano is personal; you don't share it between `Me` / `Wife`). Four tables: `piano_sessions`, `piano_pieces`, `piano_recordings`, `piano_streak`. `pieces_practiced` is stored as JSONB — the `_session_row_to_dict` helper in `db.py` decodes the value on read (asyncpg returns it as either a Python list or a JSON string depending on the driver path).
@@ -171,7 +176,7 @@ Both are resolved via `agent_runner._resolve_client`, so `/model` state is not p
 
 Voice/audio pipeline: `MessageHandler(filters.VOICE | filters.AUDIO, piano_voice_handler)` handles any audio message. If caption starts with `/piano analyze`, analysis runs inline; otherwise the `file_id`/`duration`/`kind`/`extension` is stashed in `context.user_data["pending_piano_audio"]` and the bot prompts "Is this a piano recording?". `audio_agent.analyze_recording` base64-encodes the raw audio and sends it as an OpenAI-style `input_audio` content block — there is **no** whisper/transcription step, because whisper transcribes speech and piano is notes. The model must accept audio input; `google/gemini-2.0-flash-001` accepts ogg/opus directly. No ffmpeg/pydub — raw `.ogg` bytes go straight to the provider.
 
-Text-handler dispatch: `/piano log` with no args stashes `pending_piano_log=True` and prompts "reply like `30 min Chopin, scales`". The next plain-text message triggers `calories.refine_handler`, which calls `piano.piano_text_dispatch` **first** (behind a config guard — only if `get_config().modules.piano.enabled`); if that returns `True`, the calorie refine path is skipped. This is why piano is registered before calories in `load_enabled_modules()`.
+Text-handler dispatch: `/piano log` with no args stashes `pending_piano_log=True` and prompts "reply like `30 min Chopin, scales`". The next plain-text message triggers `food.refine_handler`, which calls `piano.piano_text_dispatch` **first** (behind a config guard — only if `get_config().modules.piano.enabled`); if that returns `True`, the food refine path is skipped. This is why piano is registered before food in `load_enabled_modules()`.
 
 Streak rules (`bot/modules/piano/services/streaks.py::compute_and_update_streak`): same-day re-log is idempotent; `delta_days == 1` increments; `delta_days > 1` resets to 1; `delta_days <= 0` (backdated) keeps current. Always updates `longest = max(longest, current)`.
 

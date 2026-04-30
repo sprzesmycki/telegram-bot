@@ -8,7 +8,7 @@ Usage::
 
     from bot.config import get_config
     cfg = get_config()
-    cfg.modules.calories.enabled   # True/False
+    cfg.modules.food.enabled   # True/False
     cfg.llm.provider               # "openrouter" | "local" | "custom"
 """
 from __future__ import annotations
@@ -60,10 +60,11 @@ class LoggingConfig:
 
 
 @dataclass
-class CaloriesModuleConfig:
+class FoodModuleConfig:
     enabled: bool
     daily_summary_time: str
     daily_review_time: str
+    ai_analysis: bool = True
 
 
 @dataclass
@@ -98,7 +99,7 @@ class GmailModuleConfig:
 
 @dataclass
 class ModulesConfig:
-    calories: CaloriesModuleConfig
+    food: FoodModuleConfig
     supplements: SupplementsModuleConfig
     piano: PianoModuleConfig
     invoices: InvoicesModuleConfig
@@ -139,7 +140,7 @@ def load_config(path: Path | None = None) -> AppConfig:
     llm_sec = raw.get("llm", {})
     stor_sec = raw.get("storage", {})
     mod_sec = raw.get("modules", {})
-    cal_sec = mod_sec.get("calories", {})
+    cal_sec = mod_sec.get("food", {})
     pia_sec = mod_sec.get("piano", {})
     inv_sec = mod_sec.get("invoices", {})
     sub_sec = mod_sec.get("subscriptions", {})
@@ -208,10 +209,11 @@ def load_config(path: Path | None = None) -> AppConfig:
             ),
         ),
         modules=ModulesConfig(
-            calories=CaloriesModuleConfig(
+            food=FoodModuleConfig(
                 enabled=cal_sec.get("enabled", True),
                 daily_summary_time=cal_sec.get("schedules", {}).get("daily_summary_time", "21:00"),
                 daily_review_time=cal_sec.get("schedules", {}).get("daily_review_time", "22:00"),
+                ai_analysis=cal_sec.get("ai_analysis", True),
             ),
             supplements=SupplementsModuleConfig(
                 enabled=sup_sec.get("enabled", True),

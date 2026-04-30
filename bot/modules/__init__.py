@@ -6,8 +6,8 @@ Each module exposes a singleton ``module`` object with:
 - ``register_scheduled(scheduler, bot) -> None`` — attach cron jobs
 - ``COMMANDS: list[tuple[str, str]]`` — flat list of (name, description)
 
-Registration order matters: piano must be loaded before calories because
-``calories.refine_handler`` conditionally calls ``piano.piano_text_dispatch``.
+Registration order matters: piano must be loaded before food because
+``food.refine_handler`` conditionally calls ``piano.piano_text_dispatch``.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def load_enabled_modules():
     from bot.modules.core import module as core_module
     modules = [core_module]
 
-    # Piano before calories (text-dispatch dependency)
+    # Piano before food (text-dispatch dependency)
     if cfg.modules.piano.enabled:
         from bot.modules.piano import module as piano_module
         modules.append(piano_module)
@@ -32,12 +32,12 @@ def load_enabled_modules():
     else:
         logger.info("Module disabled: piano")
 
-    if cfg.modules.calories.enabled:
-        from bot.modules.calories import module as calories_module
-        modules.append(calories_module)
-        logger.info("Module loaded: calories")
+    if cfg.modules.food.enabled:
+        from bot.modules.food import module as food_module
+        modules.append(food_module)
+        logger.info("Module loaded: food")
     else:
-        logger.info("Module disabled: calories")
+        logger.info("Module disabled: food")
 
     if cfg.modules.supplements.enabled:
         from bot.modules.supplements import module as supplements_module

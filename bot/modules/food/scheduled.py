@@ -1,10 +1,10 @@
-"""Scheduled jobs for the calories module.
+"""Scheduled jobs for the food module.
 
 Registers two cron jobs on startup:
 - daily_summary  — sends each profile a nutrition summary at daily_summary_time
 - daily_review   — sends each profile an AI-powered day review at daily_review_time
 
-Both times are read from config.yaml modules.calories.schedules.
+Both times are read from config.yaml modules.food.schedules.
 """
 from __future__ import annotations
 
@@ -19,12 +19,12 @@ logger = logging.getLogger(__name__)
 
 
 def register_all(scheduler: AsyncIOScheduler, bot) -> None:
-    cfg = get_config().modules.calories
+    cfg = get_config().modules.food
     if cfg.enabled:
         _register_daily_summary(scheduler, bot, cfg.daily_summary_time)
         _register_daily_review(scheduler, bot, cfg.daily_review_time)
     else:
-        logger.info("Calories module disabled; skipping daily summary/review scheduling")
+        logger.info("Food module disabled; skipping daily summary/review scheduling")
 
 
 def _parse_schedule_time(time_str: str, label: str) -> tuple[int, int]:
@@ -44,7 +44,7 @@ def _register_daily_summary(scheduler: AsyncIOScheduler, bot, time_str: str) -> 
 
     async def _send_summaries() -> None:
         from bot.config import get_config
-        from bot.modules.calories.handlers.summary import send_daily_summary
+        from bot.modules.food.handlers.summary import send_daily_summary
         from bot.services import db
         cfg = get_config()
 
@@ -78,14 +78,14 @@ def _register_daily_summary(scheduler: AsyncIOScheduler, bot, time_str: str) -> 
         id="daily_summary",
         replace_existing=True,
     )
-    logger.info("Calories: daily summary scheduled at %s", time_str)
+    logger.info("Food: daily summary scheduled at %s", time_str)
 
 
 def _register_daily_review(scheduler: AsyncIOScheduler, bot, time_str: str) -> None:
     hour, minute = _parse_schedule_time(time_str, "daily_review_time")
 
     async def _send_reviews() -> None:
-        from bot.modules.calories.handlers.review import send_daily_review
+        from bot.modules.food.handlers.review import send_daily_review
         from bot.services import db
 
         owner_ids = await db.get_distinct_profile_owner_ids()
@@ -112,4 +112,4 @@ def _register_daily_review(scheduler: AsyncIOScheduler, bot, time_str: str) -> N
         id="daily_review",
         replace_existing=True,
     )
-    logger.info("Calories: daily review scheduled at %s", time_str)
+    logger.info("Food: daily review scheduled at %s", time_str)

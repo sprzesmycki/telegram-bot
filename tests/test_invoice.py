@@ -1,7 +1,7 @@
 """Tests for invoice billing-period math, summary aggregation, and formatting."""
 import pytest
 
-from bot.modules.calories.scheduled import _parse_schedule_time
+from bot.modules.food.scheduled import _parse_schedule_time
 from bot.modules.invoices.handlers.invoices import _fmt_amount
 from bot.modules.invoices.services.summary import (
     _effective,

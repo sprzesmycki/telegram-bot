@@ -29,8 +29,9 @@ storage:
   gmail_attachments_dir: "./data/gmail_attachments"
 
 modules:
-  calories:
+  food:
     enabled: false
+    ai_analysis: true
     schedules:
       daily_summary_time: "21:00"
       daily_review_time: "22:00"
