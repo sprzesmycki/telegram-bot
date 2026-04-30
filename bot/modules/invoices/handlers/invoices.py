@@ -1045,8 +1045,8 @@ COMMANDS: list[tuple[str, str]] = [
 
 
 def register(app: Application) -> None:
-    # Group -1 fires before the calories photo handler (group 0).
-    # ApplicationHandlerStop prevents calories from also processing these photos.
+    # Group -1 fires before the food photo handler (group 0).
+    # ApplicationHandlerStop prevents food from also processing these photos.
     app.add_handler(
         MessageHandler(
             filters.PHOTO & filters.CaptionRegex(r"(?i)^/invoice"),

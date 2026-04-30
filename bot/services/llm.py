@@ -274,7 +274,7 @@ async def analyze_meal(
     Raises ``LLMParseError`` when the model fails to return valid JSON.
     """
     from bot.services.agent_runner import load_agent
-    agent = load_agent("bot/modules/calories/agents/meal_analyzer.md")
+    agent = load_agent("bot/modules/food/agents/meal_analyzer.md")
 
     if image_base64 is not None:
         hint = (description or "").strip()
@@ -332,7 +332,7 @@ async def analyze_liquid(
     Raises ``LLMParseError`` when the model fails to return valid JSON.
     """
     from bot.services.agent_runner import load_agent
-    agent = load_agent("bot/modules/calories/agents/liquid_analyzer.md")
+    agent = load_agent("bot/modules/food/agents/liquid_analyzer.md")
 
     messages = [
         {"role": "system", "content": agent.system_prompt},
@@ -360,7 +360,7 @@ async def analyze_recipe(
     Raises ``LLMParseError`` when the model fails to return valid JSON.
     """
     from bot.services.agent_runner import load_agent
-    agent = load_agent("bot/modules/calories/agents/recipe_analyzer.md")
+    agent = load_agent("bot/modules/food/agents/recipe_analyzer.md")
 
     user_text = recipe_text
     if servings is not None:
@@ -475,7 +475,7 @@ async def review_day(
     """
     from bot.services.agent_runner import load_agent, run_agent
 
-    agent = load_agent("bot/modules/calories/agents/day_reviewer.md")
+    agent = load_agent("bot/modules/food/agents/day_reviewer.md")
 
     payload = _format_review_payload(
         profile_name, review_date, meals, liquids, totals, goal, hydration_ml,

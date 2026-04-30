@@ -752,7 +752,7 @@ async def _run_analysis(
 
 
 # ---------------------------------------------------------------------------
-# Text dispatch — called from calories.refine_handler
+# Text dispatch — called from food.refine_handler
 # ---------------------------------------------------------------------------
 
 
@@ -807,8 +807,8 @@ def register(app) -> None:
     )
     app.add_handler(CallbackQueryHandler(_piano_remove_confirm_callback, pattern=r"^piano_remove_confirm:"))
     app.add_handler(CallbackQueryHandler(_piano_remove_cancel_callback, pattern=r"^piano_remove_cancel$"))
-    # Group 1: fires in addition to calories' group-0 text handler when both modules are enabled.
-    # When calories is disabled, this is the only handler for pending piano log replies.
+    # Group 1: fires in addition to food's group-0 text handler when both modules are enabled.
+    # When food is disabled, this is the only handler for pending piano log replies.
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, _piano_pending_text_handler),
         group=1,
